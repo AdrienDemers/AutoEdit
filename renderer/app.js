@@ -1769,6 +1769,7 @@
     let recorderStarted = false;
     let outputStream = null;
     let animationFrame = null;
+    let pendingFrame = null;
     let writeChain = Promise.resolve();
     let writeError = null;
     let finished = false;
@@ -1833,6 +1834,7 @@
         player.playsInline = true;
         player.volume = 1;
         player.muted = false;
+        exportPlayers.set(sourceId, { player, gain: null, video });
         const ready = waitForExportMedia(player, 'loadedmetadata', task.controller.signal);
         player.src = video.url;
         await ready;
@@ -1870,22 +1872,16 @@
       await audioContext.resume();
       checkCancelled();
       music.currentTime = 0;
-      recorder.start(1000);
-      recorderStarted = true;
-      exportPhase = 'starting music playback';
-      await music.play();
 
       let currentCut = null;
       let cutIndex = 0;
-      let cutToken = 0;
       let lastProgressSecond = -1;
       let activePlayer = null;
       let activePlayerReady = false;
-      const activateCut = async (cut, time, token) => {
+      const activateCut = async (cut, time) => {
         for (const { player, gain } of exportPlayers.values()) {
-          const isActive = cut && player === exportPlayers.get(cut.sourceId).player;
-          gain.gain.setTargetAtTime(isActive && state.clipAudioEnabled ? 1 : 0, audioContext.currentTime, 0.015);
-          if (!isActive) player.pause();
+          gain.gain.setValueAtTime(0, audioContext.currentTime);
+          player.pause();
         }
         if (!cut) return;
         const entry = exportPlayers.get(cut.sourceId);
@@ -1894,17 +1890,19 @@
           cut.sourceStart + Math.max(0, time - cut.start),
           entry.video.duration ? entry.video.duration - 0.04 : cut.sourceStart
         ));
-        if (player.readyState < 2) await waitForExportMedia(player, 'loadeddata', task.controller.signal);
-        if (Math.abs(player.currentTime - targetTime) > 0.08) {
-          await waitForExportSeek(player, targetTime, entry.video.file.name, task.controller.signal);
-        }
-        if (token !== cutToken || task.cancelled) return;
+        // Seek as soon as metadata is available; an initial frame may never load while paused.
+        await waitForExportSeek(player, targetTime, entry.video.file.name, task.controller.signal);
+        checkCancelled();
         await player.play();
-        if (token === cutToken) activePlayerReady = true;
+        checkCancelled();
+        entry.gain.gain.setValueAtTime(state.clipAudioEnabled ? 1 : 0, audioContext.currentTime);
+        activePlayerReady = true;
       };
 
-      const renderFrame = () => {
-        if (task.cancelled || writeError || music.ended || music.currentTime >= exportDuration) {
+      const renderFrame = async () => {
+        checkCancelled();
+        if (writeError) throw writeError;
+        if (music.ended || music.currentTime >= exportDuration) {
           stopRecorder();
           return;
         }
@@ -1913,16 +1911,21 @@
         const nextCut = cuts[cutIndex] && cuts[cutIndex].start <= time ? cuts[cutIndex] : null;
         if (nextCut !== currentCut) {
           currentCut = nextCut;
-          cutToken++;
+          music.pause();
+          if (recorder.state === 'recording') recorder.pause();
           activePlayer = nextCut ? exportPlayers.get(nextCut.sourceId).player : null;
           activePlayerReady = false;
-          activateCut(nextCut, time, cutToken).catch((error) => {
-            const source = getVideo(nextCut.sourceId);
-            const sourceName = source?.file.name || nextCut.sourceId;
-            writeError = new Error(`Could not play source video "${sourceName}" at ${formatSourceTime(nextCut.sourceStart, true)}: ${describeExportError(error)}`);
-            stopRecorder();
-          });
+          lastProgressSecond = -1;
+          $('exportMessage').textContent = 'Preparing next source clip…';
+          try {
+            await activateCut(nextCut, time);
+          } catch (error) {
+            const sourceName = getVideo(nextCut?.sourceId)?.file.name || nextCut?.sourceId || 'timeline gap';
+            throw new Error(`Could not play source video "${sourceName}" at ${formatSourceTime(nextCut?.sourceStart || 0, true)}: ${describeExportError(error)}`);
+          }
         }
+        checkCancelled();
+        if (writeError) throw writeError;
 
         try {
           exportContext.fillStyle = '#000';
@@ -1933,6 +1936,14 @@
             const height = activePlayer.videoHeight * scale;
             exportContext.drawImage(activePlayer, (exportCanvas.width - width) / 2, (exportCanvas.height - height) / 2, width, height);
           }
+          if (!recorderStarted) {
+            recorder.start(1000);
+            recorderStarted = true;
+          } else if (recorder.state === 'paused') {
+            recorder.resume();
+          }
+          if (music.paused) await music.play();
+          checkCancelled();
           $('exportProgress').value = Math.min(1, time / exportDuration);
           const progressSecond = Math.floor(time);
           if (progressSecond !== lastProgressSecond) {
@@ -1940,15 +1951,21 @@
             lastProgressSecond = progressSecond;
           }
         } catch (error) {
-          writeError = new Error(`Could not render a video frame: ${describeExportError(error)}`);
-          stopRecorder();
-          return;
+          throw new Error(`Could not render a video frame: ${describeExportError(error)}`);
         }
-        animationFrame = requestAnimationFrame(renderFrame);
+        scheduleFrame();
+      };
+      let rejectRendering;
+      const renderingFailed = new Promise((_resolve, reject) => { rejectRendering = reject; });
+      const scheduleFrame = () => {
+        animationFrame = requestAnimationFrame(() => {
+          pendingFrame = renderFrame();
+          pendingFrame.catch(rejectRendering);
+        });
       };
       exportPhase = 'rendering the video';
-      animationFrame = requestAnimationFrame(renderFrame);
-      await recorderStopped;
+      scheduleFrame();
+      await Promise.race([recorderStopped, renderingFailed]);
       if (animationFrame !== null) cancelAnimationFrame(animationFrame);
       await writeChain;
       if (writeError) throw writeError;
@@ -1975,6 +1992,8 @@
         showNotice('generateNotice', message, 'warning');
       }
     } finally {
+      task.controller.abort();
+      if (pendingFrame) await pendingFrame.catch(() => {});
       if (music) {
         music.pause();
         music.removeAttribute('src');
