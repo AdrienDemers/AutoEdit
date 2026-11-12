@@ -1,9 +1,21 @@
 const { contextBridge, ipcRenderer, webUtils } = require('electron');
-const { pathToFileURL } = require('url');
+
+function pathToFileURL(filePath) {
+  const normalizedPath = filePath.replace(/\\/g, '/').replace(/%/g, '%25');
+  const url = new URL('file:///');
+  if (normalizedPath.startsWith('//')) {
+    const [, , host, ...segments] = normalizedPath.split('/');
+    url.hostname = host;
+    url.pathname = `/${segments.join('/')}`;
+  } else {
+    url.pathname = `/${normalizedPath.replace(/^\/+/, '')}`;
+  }
+  return url.href;
+}
 
 contextBridge.exposeInMainWorld('autoEditDesktop', Object.freeze({
   getPathForFile: (file) => webUtils.getPathForFile(file),
-  pathToFileURL: (filePath) => pathToFileURL(filePath).href,
+  pathToFileURL,
   loadSession: () => ipcRenderer.invoke('session:load'),
   saveSession: (session) => ipcRenderer.sendSync('session:save', session),
   readAudioFile: (filePath) => ipcRenderer.invoke('media:read-audio', filePath),
@@ -15,5 +27,9 @@ contextBridge.exposeInMainWorld('autoEditDesktop', Object.freeze({
     return () => ipcRenderer.removeListener('analysis:apply-settings', listener);
   },
   openProject: () => ipcRenderer.invoke('project:open'),
-  saveProject: (project) => ipcRenderer.invoke('project:save', project)
+  saveProject: (project) => ipcRenderer.invoke('project:save', project),
+  beginVideoExport: () => ipcRenderer.invoke('video-export:begin'),
+  writeVideoExport: (chunk) => ipcRenderer.invoke('video-export:write', chunk),
+  finishVideoExport: () => ipcRenderer.invoke('video-export:finish'),
+  cancelVideoExport: () => ipcRenderer.invoke('video-export:cancel')
 }));

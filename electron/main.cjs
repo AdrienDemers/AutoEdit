@@ -1,10 +1,13 @@
 const path = require('node:path');
 const fs = require('node:fs');
+const { randomUUID } = require('node:crypto');
+const { once } = require('node:events');
 const { app, BrowserWindow, dialog, ipcMain } = require('electron');
 
 const sessionFilePath = () => path.join(app.getPath('userData'), 'session.json');
 const projectPaths = new WeakMap();
 const projectMediaPaths = new WeakMap();
+const videoExports = new WeakMap();
 const analysisWindows = new WeakMap();
 const analysisWindowOwners = new WeakMap();
 
@@ -162,6 +165,69 @@ ipcMain.handle('project:save', async (event, project) => {
   projectPaths.set(event.sender, filePath);
   projectMediaPaths.set(event.sender, mediaPathsFor(project.session));
   return { filePath, name: projectFile.name };
+});
+
+ipcMain.handle('video-export:begin', async (event) => {
+  if (videoExports.has(event.sender)) throw new Error('A video export is already in progress.');
+  const result = await dialog.showSaveDialog(BrowserWindow.fromWebContents(event.sender), {
+    defaultPath: 'autoedit-first-pass.mp4',
+    filters: [{ name: 'MP4 Video', extensions: ['mp4'] }]
+  });
+  if (result.canceled || !result.filePath) return null;
+
+  const parsedPath = path.parse(result.filePath);
+  const filePath = /\.mp4$/i.test(result.filePath)
+    ? result.filePath
+    : path.join(parsedPath.dir, `${parsedPath.name}.mp4`);
+  const temporaryPath = `${filePath}.${process.pid}.${randomUUID()}.tmp`;
+  const stream = fs.createWriteStream(temporaryPath, { flags: 'wx' });
+  const exportState = { filePath, temporaryPath, stream, error: null };
+  stream.on('error', (error) => { exportState.error = error; });
+  videoExports.set(event.sender, exportState);
+  return filePath;
+});
+
+ipcMain.handle('video-export:write', async (event, chunk) => {
+  const exportState = videoExports.get(event.sender);
+  if (!exportState) throw new Error('There is no active video export.');
+  if (!(chunk instanceof Uint8Array)) throw new Error('Invalid video export data.');
+  if (exportState.error) throw exportState.error;
+  if (!chunk.byteLength) return;
+
+  if (!exportState.stream.write(Buffer.from(chunk))) {
+    await Promise.race([
+      once(exportState.stream, 'drain'),
+      once(exportState.stream, 'error')
+    ]);
+  }
+  if (exportState.error) throw exportState.error;
+});
+
+ipcMain.handle('video-export:finish', async (event) => {
+  const exportState = videoExports.get(event.sender);
+  if (!exportState) throw new Error('There is no active video export.');
+  try {
+    if (exportState.error) throw exportState.error;
+    exportState.stream.end();
+    await once(exportState.stream, 'finish');
+    await fs.promises.rename(exportState.temporaryPath, exportState.filePath);
+    return exportState.filePath;
+  } catch (error) {
+    exportState.stream.destroy();
+    try { await fs.promises.rm(exportState.temporaryPath, { force: true }); } catch {}
+    throw error;
+  } finally {
+    videoExports.delete(event.sender);
+  }
+});
+
+ipcMain.handle('video-export:cancel', async (event) => {
+  const exportState = videoExports.get(event.sender);
+  if (!exportState) return;
+  videoExports.delete(event.sender);
+  exportState.stream.destroy();
+  if (!exportState.stream.closed) await once(exportState.stream, 'close');
+  await fs.promises.rm(exportState.temporaryPath, { force: true });
 });
 
 function createMainWindow() {

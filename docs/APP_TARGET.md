@@ -25,11 +25,11 @@ The app is intended to reduce repetitive source review and rough-cut assembly, w
 2. Analyze the track and review suggested beat-aligned cut points.
 3. Choose a cut cadence and assign video sources to sections of the music timeline.
 4. Generate a first-pass edit using clips from those sources in chronological source order.
-5. Review and adjust ranges, playback position, and audio mix, then export an edit list.
+5. Review and adjust ranges, playback position, and audio mix, then export an MP4 video or CSV edit list.
 6. Save the project and reopen it later to continue.
 
 ## Product Boundaries
 
-AutoEdit proposes a rough edit; it does not decide which shots are artistically best. The current beat detector is approximate and its suggestions should be reviewed. The current prototype previews and exports an edit list, but does not render a finished video or create a native Premiere Pro sequence.
+AutoEdit proposes a rough edit; it does not decide which shots are artistically best. The current beat detector is approximate and its suggestions should be reviewed. The desktop app renders a 1080p, 30 fps MP4 video and exports an edit list, but does not create a native Premiere Pro sequence.
 
 See [Features](FEATURES.md) for the current prototype scope and planned capabilities.
