@@ -1,0 +1,1811 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#171a18">
+  <title>AutoEdit - Music video assembly</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --ink: #e8e9df;
+      --muted: #9a9f96;
+      --quiet: #6f766e;
+      --base: #171a18;
+      --panel: #202421;
+      --panel-raised: #282d29;
+      --line: #373d38;
+      --lime: #c9ef74;
+      --lime-dim: #9ab84d;
+      --coral: #ff806b;
+      --blue: #83b9d1;
+      --serif: Georgia, "Times New Roman", serif;
+      --sans: "Bahnschrift", "Segoe UI", sans-serif;
+      font-family: var(--sans);
+      font-synthesis: none;
+    }
+
+    * { box-sizing: border-box; }
+    body { margin: 0; min-width: 320px; min-height: 100vh; background: var(--base); color: var(--ink); }
+    button, input, select { font: inherit; }
+    button { color: inherit; }
+    button:focus-visible, input:focus-visible, select:focus-visible { outline: 2px solid var(--lime); outline-offset: 2px; }
+
+    .app { min-height: 100vh; display: grid; grid-template-rows: 58px minmax(0, 1fr); }
+    .topbar { display: flex; align-items: center; gap: 20px; padding: 0 22px; border-bottom: 1px solid var(--line); background: #1c201d; }
+    .brand { display: flex; align-items: center; gap: 10px; min-width: 190px; }
+    .brand-mark { width: 25px; height: 25px; display: grid; place-items: center; border: 1px solid var(--lime-dim); color: var(--lime); font-size: 13px; transform: rotate(45deg); }
+    .brand-mark span { transform: rotate(-45deg); }
+    .brand-name { font-size: 14px; font-weight: 700; letter-spacing: .06em; }
+    .project-name { color: var(--muted); font: 16px var(--serif); }
+    .project-actions { display: flex; align-items: center; gap: 6px; }
+    .topbar-spacer { flex: 1; }
+    .topbar-note { color: var(--quiet); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
+    .button { min-height: 34px; padding: 0 12px; border: 1px solid var(--line); border-radius: 3px; background: transparent; color: var(--ink); cursor: pointer; font-size: 12px; }
+    .button:hover { border-color: var(--muted); background: #2a302b; }
+    .button.primary { background: var(--lime); border-color: var(--lime); color: #20251a; font-weight: 700; }
+    .button.primary:hover { background: #d8f894; }
+    .button:disabled { cursor: not-allowed; opacity: .45; }
+
+    .layout { display: grid; grid-template-columns: minmax(160px, var(--library-width, 248px)) 8px minmax(390px, 1fr) 8px minmax(210px, var(--inspector-width, 268px)); min-height: 0; }
+    .library, .inspector { min-height: calc(100vh - 58px); background: var(--panel); }
+    .library { padding: 20px 14px; }
+    .inspector { padding: 20px 16px; }
+    .panel-resizer { position: relative; z-index: 2; display: grid; place-items: center; padding: 0; border: 0; background: transparent; color: var(--line); cursor: col-resize; touch-action: none; user-select: none; }
+    .panel-resizer::before { width: 1px; height: 100%; max-height: 42px; background: currentColor; content: ""; }
+    .panel-resizer:hover, .panel-resizer:focus-visible, .panel-resizer.dragging { color: var(--lime); }
+    .panel-resizer:focus-visible { outline: 1px solid var(--lime); outline-offset: -2px; }
+    .panel-resizer.horizontal { cursor: row-resize; }
+    .panel-resizer.horizontal::before { width: 42px; height: 1px; }
+    body.panel-resizing, body.panel-resizing * { cursor: col-resize !important; }
+    body.panel-resizing-horizontal, body.panel-resizing-horizontal * { cursor: row-resize !important; }
+    .section-heading { display: flex; align-items: baseline; justify-content: space-between; margin: 0 0 13px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .section-heading span:last-child { color: var(--quiet); font-size: 10px; font-weight: 400; letter-spacing: 0; text-transform: none; }
+    .library-group { margin-bottom: 26px; }
+    .import-row { display: flex; gap: 7px; margin-bottom: 10px; }
+    .import-row .button { flex: 1; padding-inline: 8px; }
+    .asset-list { display: grid; gap: 5px; }
+    .asset { display: grid; grid-template-columns: 35px minmax(0, 1fr) 22px; align-items: center; gap: 9px; min-height: 51px; padding: 6px; border: 1px solid transparent; border-radius: 3px; background: #252a26; }
+    .asset.selected { border-color: #687846; background: #2a3026; }
+    .music-asset { cursor: pointer; }
+    .music-asset:hover { border-color: var(--lime-dim); }
+    .asset-thumb { width: 35px; height: 35px; display: grid; place-items: center; overflow: hidden; background: #394039; color: var(--lime); font-size: 11px; }
+    .asset-thumb img { width: 100%; height: 100%; object-fit: cover; }
+    .asset-copy { min-width: 0; }
+    .asset-name { overflow: hidden; color: #dfe2d7; font-size: 11px; text-overflow: ellipsis; white-space: nowrap; }
+    .asset-meta { margin-top: 4px; color: var(--quiet); font-size: 10px; }
+    .asset-action { width: 22px; height: 26px; border: 0; background: transparent; color: var(--quiet); cursor: pointer; }
+    .asset-action:hover { color: var(--coral); }
+    .empty-note { padding: 13px 10px; border: 1px dashed #464d46; color: var(--quiet); font-size: 11px; line-height: 1.5; }
+    .drop-zone { margin-top: 18px; padding: 12px; border: 1px dashed #454c46; color: var(--quiet); font-size: 10px; line-height: 1.45; text-align: center; }
+    .drop-zone.dragging { border-color: var(--lime); color: var(--lime); background: #252c20; }
+
+    .workbench { display: grid; grid-template-rows: 50px minmax(180px, var(--monitor-fr, 60fr)) 8px 42px minmax(180px, var(--timeline-fr, 40fr)); gap: 10px; min-width: 0; padding: 14px 18px 18px; }
+    .workbench-bar { display: flex; align-items: center; gap: 10px; min-width: 0; }
+    .workbench-title { color: var(--muted); font: 19px var(--serif); }
+    .workbench-status { margin-left: 2px; padding-left: 12px; border-left: 1px solid var(--line); color: var(--quiet); font-size: 11px; }
+    .workbench-bar .spacer { flex: 1; }
+    .transport-time { min-width: 78px; color: var(--lime); font: 13px Consolas, monospace; text-align: right; }
+    .icon-button { width: 35px; height: 34px; display: grid; place-items: center; border: 1px solid var(--line); border-radius: 3px; background: #252a26; cursor: pointer; }
+    .icon-button:hover { border-color: var(--lime-dim); color: var(--lime); }
+    .monitor { position: relative; display: grid; min-height: 180px; place-items: center; overflow: hidden; border: 1px solid #343a35; background: radial-gradient(ellipse at 48% 42%, #303732 0%, #202522 48%, #181b19 100%); }
+    .monitor video { display: none; }
+    .monitor canvas { width: 100%; height: 100%; max-height: calc(100vh - 395px); object-fit: contain; background: #101210; }
+    .monitor-empty { max-width: 310px; padding: 20px; text-align: center; }
+    .monitor-empty strong { display: block; margin-bottom: 8px; color: #d7ddce; font: 24px var(--serif); font-weight: 400; }
+    .monitor-empty p { margin: 0; color: var(--muted); font-size: 11px; line-height: 1.6; }
+    .monitor-label { position: absolute; top: 10px; left: 10px; padding: 5px 7px; background: #111512cc; color: var(--lime); font: 10px Consolas, monospace; }
+    .frame-indicator { position: absolute; top: 10px; right: 10px; display: flex; align-items: center; gap: 6px; padding: 5px 7px; background: #111512cc; color: var(--quiet); font: 10px Consolas, monospace; }
+    .preview-context-menu { position: absolute; z-index: 5; min-width: 180px; padding: 9px; border: 1px solid var(--line); border-radius: 3px; background: #1c201d; box-shadow: 0 8px 24px #0009; }
+    .preview-context-menu label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 700; }
+    .preview-context-menu select { width: 100%; height: 30px; padding: 0 7px; border: 1px solid var(--line); border-radius: 2px; background: #181c19; color: var(--ink); font-size: 11px; }
+    .frame-indicator::before { width: 7px; height: 7px; border-radius: 50%; background: currentColor; content: ""; }
+    .frame-indicator[data-status="waiting"] { color: var(--blue); }
+    .frame-indicator[data-status="ok"] { color: var(--lime); }
+    .frame-indicator[data-status="dropped"], .frame-indicator[data-status="error"] { color: var(--coral); }
+    .monitor-source { position: absolute; right: 10px; bottom: 10px; padding: 5px 7px; background: #111512cc; color: #d4d7cc; font-size: 10px; }
+
+    .timeline { padding: 13px 13px 12px; border: 1px solid var(--line); background: #1e221f; }
+    .timeline-top { display: flex; align-items: center; gap: 10px; margin-bottom: 12px; }
+    .timeline-title { color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .12em; text-transform: uppercase; }
+    .timeline-duration { color: var(--quiet); font: 10px Consolas, monospace; }
+    .timeline-top .spacer { flex: 1; }
+    .timeline-help { color: var(--quiet); font-size: 10px; }
+    .timeline-ruler { position: relative; height: 19px; margin-left: 82px; color: var(--quiet); font: 9px Consolas, monospace; }
+    .ruler-mark { position: absolute; top: 0; height: 19px; transform: translateX(-50%); white-space: nowrap; }
+    .ruler-mark::after { position: absolute; top: 13px; left: 50%; width: 1px; height: 6px; background: #505950; content: ""; }
+    .wave-wrap { position: relative; height: 76px; overflow: hidden; border: 1px solid #353d36; background: #171c18; cursor: crosshair; }
+    #waveform { width: 100%; height: 100%; display: block; }
+    .playhead { position: absolute; top: 0; bottom: 0; left: 0; z-index: 4; width: 13px; transform: translateX(-50%); background: transparent; cursor: ew-resize; pointer-events: auto; touch-action: none; }
+    .playhead::before { position: absolute; top: 0; left: 2px; width: 9px; height: 6px; background: var(--coral); content: ""; }
+    .playhead::after { position: absolute; top: 0; bottom: 0; left: 6px; width: 1px; background: var(--coral); content: ""; }
+    .audio-track { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: stretch; }
+    .track-control { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-right: 1px solid var(--line); background: #232824; }
+    .track-control-name { color: var(--muted); font: 10px Consolas, monospace; }
+    .track-audio-toggle { width: 38px; min-height: 22px; padding: 0 5px; border: 1px solid var(--line); border-radius: 2px; background: #191d1a; color: var(--quiet); cursor: pointer; font-size: 9px; }
+    .track-audio-toggle[aria-pressed="true"] { border-color: var(--lime-dim); color: var(--lime); }
+    .track-audio-toggle:hover { border-color: var(--muted); }
+    .audio-track-content { min-width: 0; }
+    .track-label { display: flex; align-items: center; gap: 7px; height: 27px; padding: 5px 5px 0; color: var(--muted); font-size: 10px; }
+    .track-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--lime); }
+    .beat-count { margin-left: auto; color: var(--quiet); font: 10px Consolas, monospace; }
+    .timeline-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #737c71; font-size: 10px; pointer-events: none; }
+    .range-overlay { position: absolute; z-index: 5; inset: 0; pointer-events: none; }
+    .range-visual { position: absolute; top: 2px; bottom: 2px; border: 1px solid #83b9d1; background: #83b9d122; pointer-events: none; }
+    .range-visual.active { background: #83b9d13d; }
+    .range-visual-label { position: absolute; top: 5px; left: 13px; overflow: hidden; color: #d6e7ed; font-size: 9px; text-overflow: ellipsis; white-space: nowrap; }
+    .range-handle { position: absolute; top: -1px; bottom: -1px; z-index: 1; width: 10px; padding: 0; border: 0; background: transparent; cursor: ew-resize; pointer-events: auto; touch-action: none; }
+    .range-handle::after { position: absolute; top: 0; bottom: 0; left: 4px; width: 2px; background: #a7d7e8; content: ""; }
+    .range-handle.start { left: -5px; }
+    .range-handle.end { right: -5px; }
+    .video-track { display: grid; grid-template-columns: 82px minmax(0, 1fr); align-items: stretch; margin-top: 5px; }
+    .video-track-control { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 5px; border-right: 1px solid var(--line); background: #232824; }
+    .video-track-lane { position: relative; height: 39px; overflow: hidden; border: 1px solid #353d36; background: #171c18; }
+    .video-track-empty { position: absolute; inset: 0; display: grid; place-items: center; color: #687067; font-size: 9px; pointer-events: none; }
+    .video-clip { position: absolute; z-index: 1; top: 3px; bottom: 3px; min-width: 1px; overflow: hidden; padding: 0 4px; border: 1px solid var(--clip-color); border-radius: 2px; background: color-mix(in srgb, var(--clip-color) 23%, #202421); color: #e8e9df; cursor: pointer; font-size: 9px; text-align: left; text-overflow: ellipsis; white-space: nowrap; }
+    .video-clip:hover { filter: brightness(1.3); }
+    .track-playhead { z-index: 4; }
+    .transport-bar { display: flex; align-items: center; justify-content: center; gap: 7px; }
+    .transport-bar .transport-time { min-width: 92px; margin-left: 9px; text-align: left; }
+
+    .inspector-title { margin: 2px 0 5px; color: var(--ink); font: 20px var(--serif); }
+    .inspector-intro { margin: 0 0 20px; color: var(--muted); font-size: 11px; line-height: 1.55; }
+    .field { margin: 0 0 13px; }
+    .field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 10px; font-weight: 700; letter-spacing: .06em; text-transform: uppercase; }
+    .field input, .field select { width: 100%; height: 34px; padding: 0 9px; border: 1px solid var(--line); border-radius: 2px; background: #181c19; color: var(--ink); font-size: 12px; }
+    .field select[multiple] { height: 88px; padding: 5px; }
+    .field input[type="range"] { height: 23px; padding: 0; accent-color: var(--lime); }
+    .time-fields { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+    .field-hint { margin-top: 5px; color: var(--quiet); font-size: 10px; line-height: 1.4; }
+    .full-button { width: 100%; margin-top: 3px; }
+    .divider { height: 1px; margin: 18px 0; background: var(--line); }
+    .section-list { display: grid; gap: 6px; margin-top: 10px; }
+    .section-row { display: grid; grid-template-columns: 1fr 24px; align-items: center; gap: 4px; padding: 7px; border: 1px solid var(--line); background: #252a26; cursor: pointer; }
+    .section-row.active { border-color: var(--lime-dim); }
+    .section-row-name { color: #dfe2d7; font-size: 10px; }
+    .section-row-meta { margin-top: 4px; color: var(--quiet); font: 9px Consolas, monospace; }
+    .section-remove { border: 0; background: transparent; color: var(--quiet); cursor: pointer; }
+    .section-remove:hover { color: var(--coral); }
+    .cut-list { max-height: 142px; overflow-y: auto; margin: 9px 0 12px; padding: 0; list-style: none; }
+    .cut-row { display: grid; grid-template-columns: 1fr auto; gap: 5px; padding: 6px 0; border-bottom: 1px solid #343a35; color: var(--muted); font: 10px Consolas, monospace; }
+    .cut-row span:last-child { color: var(--lime); }
+    .cut-empty { color: var(--quiet); font-size: 10px; line-height: 1.5; }
+    .notice { min-height: 16px; margin-top: 8px; color: var(--lime-dim); font-size: 10px; line-height: 1.45; }
+    .hidden { display: none !important; }
+
+    @media (max-width: 1050px) {
+      .layout { grid-template-columns: minmax(160px, var(--library-width, 205px)) 8px minmax(350px, 1fr); }
+      .inspector-resizer { display: none; }
+      .inspector { grid-column: 1 / -1; min-height: auto; border-top: 1px solid var(--line); border-left: 0; }
+      .inspector-inner { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 18px; align-items: start; }
+      .inspector-intro { max-width: 230px; }
+      .inspector .divider { display: none; }
+      .inspector .section-heading { margin-top: 5px; }
+    }
+    @media (max-width: 650px) {
+      .app { grid-template-rows: 54px auto; }
+      .topbar { gap: 10px; padding: 0 12px; }
+      .brand { min-width: 0; }
+      .brand-name { font-size: 12px; }
+      .project-name, .topbar-note { display: none; }
+      .layout { grid-template-columns: 1fr; }
+      .panel-resizer { display: none; }
+      .library { min-height: auto; padding: 14px 12px; border-bottom: 1px solid var(--line); }
+      .library-group { margin-bottom: 12px; }
+      .library-group:last-of-type { margin-bottom: 0; }
+      .asset-list { grid-template-columns: repeat(auto-fill, minmax(150px, 1fr)); }
+      .drop-zone { display: none; }
+      .workbench { grid-row: 2; grid-template-rows: 44px minmax(220px, 42vh) 42px auto; gap: 10px; padding: 10px 12px 14px; }
+      .workbench-title { font-size: 17px; }
+      .workbench-status { display: none; }
+      .monitor { min-height: 220px; }
+      .monitor canvas { max-height: 42vh; }
+      .timeline-help { display: none; }
+      .inspector { grid-column: auto; padding: 16px 12px; }
+      .inspector-inner { display: block; }
+      .inspector .divider { display: block; }
+      .inspector-intro { max-width: none; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand"><div class="brand-mark"><span>A</span></div><div class="brand-name">AUTOEDIT</div></div>
+      <div class="project-name" id="projectName">Untitled music video</div>
+      <div class="project-actions">
+        <button class="button" id="openProjectButton" title="Open an AutoEdit project">Open project</button>
+        <button class="button" id="saveProjectButton" title="Save this AutoEdit project">Save project</button>
+      </div>
+      <div class="topbar-spacer"></div>
+      <div class="topbar-note">Local session</div>
+      <button class="button" id="exportButton" disabled title="Export the generated edit list as CSV">Export edit list</button>
+    </header>
+
+    <div class="layout" id="layout">
+      <aside class="library" id="library">
+        <section class="library-group">
+          <h2 class="section-heading">Music <span id="musicDuration">No track</span></h2>
+          <div class="import-row"><button class="button" id="addMusic">+ Add music</button></div>
+          <div class="asset-list" id="musicList"><div class="empty-note">Import a song to begin building your cut.</div></div>
+        </section>
+        <section class="library-group">
+          <h2 class="section-heading">Video sources <span id="videoCount">0 clips</span></h2>
+          <div class="import-row"><button class="button" id="addVideos">+ Add footage</button></div>
+          <div class="asset-list" id="videoList"><div class="empty-note">Add camera angles or other footage sources.</div></div>
+        </section>
+        <div class="drop-zone" id="dropZone">Drop audio and video files here<br>Files stay on this device.</div>
+      </aside>
+      <div class="panel-resizer library-resizer" id="libraryResizer" role="separator" aria-label="Resize media library" aria-controls="library workbench" aria-orientation="vertical" aria-valuemin="160" aria-valuenow="248" aria-valuemax="600" tabindex="0" title="Drag to resize the media library"></div>
+
+      <main class="workbench" id="workbench">
+        <div class="workbench-bar">
+          <div class="workbench-title">Assembly</div>
+          <div class="workbench-status" id="statusText">Import a song and footage to get started</div>
+          <div class="spacer"></div>
+        </div>
+        <section class="monitor" id="monitor" aria-label="Video preview">
+          <video id="previewVideo" playsinline></video>
+          <canvas id="previewCanvas" class="hidden" aria-label="Video preview"></canvas>
+          <div class="monitor-empty" id="monitorEmpty"><strong>Your first cut starts here.</strong><p>Bring in a track and a few sources. AutoEdit will map musical accents to footage you choose.</p></div>
+          <div class="monitor-label" id="monitorTime">SOURCE PREVIEW</div>
+          <div class="frame-indicator" id="frameIndicator" data-status="idle" role="status" aria-live="polite" aria-label="Dropped frame status: waiting for playback" title="Dropped frame status appears during preview playback">FRAME STATUS</div>
+          <div class="preview-context-menu hidden" id="previewContextMenu" role="group" aria-label="Preview settings">
+            <label for="previewResolution">Preview resolution</label>
+            <select id="previewResolution" aria-label="Preview resolution">
+              <option value="full">Full</option>
+              <option value="half">1/2</option>
+              <option value="quarter">1/4</option>
+            </select>
+          </div>
+          <div class="monitor-source" id="monitorSource">No source selected</div>
+        </section>
+        <div class="panel-resizer horizontal workbench-resizer" id="workbenchResizer" role="separator" aria-label="Resize preview and timeline" aria-controls="monitor timelinePanel" aria-orientation="horizontal" aria-valuemin="25" aria-valuenow="60" aria-valuemax="75" tabindex="0" title="Drag to resize the preview and timeline"></div>
+        <div class="transport-bar" aria-label="Playback controls">
+          <button class="icon-button" id="previousButton" aria-label="Previous edit point" title="Previous edit point">|◀</button>
+          <button class="icon-button" id="playButton" aria-label="Play" title="Play or pause">▶</button>
+          <button class="icon-button" id="nextButton" aria-label="Next edit point" title="Next edit point">▶|</button>
+          <div class="transport-time" id="timeDisplay">00:00.0</div>
+        </div>
+        <section class="timeline" id="timelinePanel">
+          <div class="timeline-top">
+            <div class="timeline-title">Music timeline</div>
+            <div class="timeline-duration" id="timelineDuration">00:00</div>
+            <div class="spacer"></div>
+            <div class="timeline-help">Click waveform to seek</div>
+          </div>
+          <div class="timeline-ruler" id="timeRuler"></div>
+          <div class="audio-track">
+            <div class="track-control">
+              <span class="track-control-name">A1</span>
+              <button class="track-audio-toggle" id="musicAudioToggle" aria-pressed="true" title="Toggle music track audio">On</button>
+            </div>
+            <div class="audio-track-content">
+              <div class="wave-wrap" id="waveWrap">
+                <canvas id="waveform"></canvas>
+                <div class="range-overlay" id="rangeOverlay"></div>
+                <div class="timeline-empty" id="waveEmpty">Import music to view waveform and suggested edit points</div>
+                <div class="playhead" id="playhead"></div>
+              </div>
+              <div class="track-label"><span class="track-dot"></span><span id="trackName">MUSIC</span><span class="beat-count" id="beatCount">No edit points</span></div>
+            </div>
+          </div>
+          <div class="video-track">
+            <div class="video-track-control">
+              <span class="track-control-name">V1</span>
+              <button class="track-audio-toggle" id="clipAudioToggle" aria-pressed="true" title="Toggle source clip audio">On</button>
+            </div>
+            <div class="video-track-lane" id="videoTrack"><div class="video-track-empty">Generated video clips appear here</div><div class="playhead track-playhead" id="trackPlayhead"></div></div>
+          </div>
+        </section>
+      </main>
+
+      <div class="panel-resizer inspector-resizer" id="inspectorResizer" role="separator" aria-label="Resize inspector" aria-controls="workbench inspectorPanel" aria-orientation="vertical" aria-valuemin="210" aria-valuenow="268" aria-valuemax="600" tabindex="0" title="Drag to resize the inspector"></div>
+      <aside class="inspector" id="inspectorPanel">
+        <div class="inspector-inner">
+          <section>
+            <h2 class="inspector-title">Build a range</h2>
+            <p class="inspector-intro">Choose a stretch of the song and the footage AutoEdit should draw from there.</p>
+            <div class="time-fields">
+              <div class="field"><label for="rangeStart">Start · seconds</label><input id="rangeStart" type="number" min="0" step="0.1" value="0"></div>
+              <div class="field"><label for="rangeEnd">End · seconds</label><input id="rangeEnd" type="number" min="0.1" step="0.1" value="10"></div>
+            </div>
+            <div class="field-hint" id="rangeLimitHint">The song length sets the maximum range.</div>
+            <div class="field"><label for="sourceSelect">Assigned sources</label><select id="sourceSelect" multiple aria-label="Assigned video sources"></select><div class="field-hint">Use Ctrl or Command to select more than one.</div></div>
+            <button class="button full-button" id="addRangeButton">Add timeline range</button>
+            <div class="notice" id="rangeNotice" aria-live="polite"></div>
+          </section>
+
+          <section>
+            <div class="divider"></div>
+            <h2 class="section-heading">Music analysis <span id="analysisLabel">Not analyzed</span></h2>
+            <div class="field"><label for="cutCadence">Cut cadence</label><select id="cutCadence"><option value="1">Every beat</option><option value="2" selected>Every 2 beats</option><option value="4">Every bar</option></select><div class="field-hint">Keeps the strongest accent in each beat group.</div></div>
+            <div class="field"><label for="sensitivity">Accent sensitivity <span id="sensitivityValue">55%</span></label><input id="sensitivity" type="range" min="25" max="85" value="55"><div class="field-hint">Lower values ignore quieter accents.</div></div>
+            <button class="button primary full-button" id="analyzeButton" disabled>Analyze music</button>
+            <div class="notice" id="analysisNotice" aria-live="polite"></div>
+            <ul class="cut-list" id="cutList"><li class="cut-empty">Suggested cut points will appear here for review.</li></ul>
+            <button class="button full-button" id="generateButton" disabled>Generate first pass</button>
+            <div class="notice" id="generateNotice" aria-live="polite"></div>
+          </section>
+
+          <section>
+            <div class="divider"></div>
+            <h2 class="section-heading">Timeline ranges <span id="rangeCount">0 ranges</span></h2>
+            <div class="section-list" id="sectionList"><div class="cut-empty">Add a range and assign at least one source.</div></div>
+          </section>
+        </div>
+      </aside>
+    </div>
+  </div>
+
+  <input class="hidden" id="musicInput" type="file" accept="audio/*">
+  <input class="hidden" id="videoInput" type="file" accept="video/*" multiple>
+  <audio id="musicPlayer"></audio>
+
+  <script>
+    (() => {
+      const minimumSourceStart = 15;
+      const state = { music: null, audioBuffer: null, beatTimes: [], beatCandidates: [], tempoBpm: 0, videos: [], sections: [], edit: [], activeSection: null, activeCut: null, objectUrls: new Set(), playing: false, musicAudioEnabled: true, clipAudioEnabled: true, previewResolution: 'full' };
+      const $ = (id) => document.getElementById(id);
+      const panelLayoutStorageKey = 'autoedit-panel-layout';
+      const panelLayout = { libraryWidth: 248, inspectorWidth: 268, monitorRatio: 0.6 };
+      const musicInput = $('musicInput');
+      const videoInput = $('videoInput');
+      const musicPlayer = $('musicPlayer');
+      const previewVideo = $('previewVideo');
+      const previewCanvas = $('previewCanvas');
+      const monitorElement = $('monitor');
+      const previewContextMenu = $('previewContextMenu');
+      const previewContext = previewCanvas.getContext('2d', { alpha: false });
+      previewVideo.preload = 'metadata';
+      const canvas = $('waveform');
+      const context = canvas.getContext('2d');
+      const desktopApi = window.autoEditDesktop || null;
+      let rangeDrag = null;
+      let playheadDrag = null;
+      let suppressWaveClick = false;
+      let saveSessionTimer = null;
+      let frameSampleTimer = null;
+      let previewFrameCallbackId = null;
+      let previewAnimationFrameId = null;
+      let lastDroppedFrameCount = null;
+      let droppedFrameCount = 0;
+      function savePanelLayout() {
+        try {
+          localStorage.setItem(panelLayoutStorageKey, JSON.stringify(panelLayout));
+        } catch (error) {
+          console.warn('AutoEdit could not save the panel layout.', error);
+        }
+      }
+
+      function setSeparatorValue(separator, value, min, max) {
+        separator.setAttribute('aria-valuemin', String(Math.round(min)));
+        separator.setAttribute('aria-valuemax', String(Math.round(max)));
+        separator.setAttribute('aria-valuenow', String(Math.round(value)));
+        separator.setAttribute('aria-valuetext', `${Math.round(value)}${separator.classList.contains('horizontal') ? '%' : ' pixels'}`);
+      }
+
+      function columnLimits(panel) {
+        const compact = window.matchMedia('(max-width: 1050px)').matches;
+        const layoutWidth = $('layout')?.clientWidth || document.querySelector('.layout').clientWidth;
+        const inspectorWidth = compact ? 0 : $('inspectorPanel').getBoundingClientRect().width;
+        const libraryWidth = panel === 'library' ? 0 : $('library').getBoundingClientRect().width;
+        const centerMinimum = compact ? 350 : 390;
+        const dividerWidth = compact ? 8 : 16;
+        const maximum = layoutWidth - centerMinimum - dividerWidth - inspectorWidth - libraryWidth;
+        return { min: panel === 'library' ? 160 : 210, max: Math.max(panel === 'library' ? 160 : 210, maximum) };
+      }
+
+      function setColumnWidth(panel, width, preservePreference = false) {
+        const limits = columnLimits(panel);
+        const safeWidth = Math.round(Math.min(limits.max, Math.max(limits.min, width)));
+        const setting = panel === 'library' ? 'libraryWidth' : 'inspectorWidth';
+        const property = panel === 'library' ? '--library-width' : '--inspector-width';
+        if (!preservePreference) panelLayout[setting] = safeWidth;
+        document.querySelector('.layout').style.setProperty(property, `${safeWidth}px`);
+        const separator = $(`${panel}Resizer`);
+        setSeparatorValue(separator, safeWidth, limits.min, limits.max);
+      }
+
+      function setupColumnResizer(panel) {
+        const separator = $(`${panel}Resizer`);
+        const changeWidth = (width) => setColumnWidth(panel, width);
+        separator.addEventListener('pointerdown', (event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          separator.setPointerCapture(event.pointerId);
+          separator.classList.add('dragging');
+          document.body.classList.add('panel-resizing');
+          const startX = event.clientX;
+          const startWidth = $(panel === 'library' ? 'library' : 'inspectorPanel').getBoundingClientRect().width;
+          const direction = panel === 'library' ? 1 : -1;
+          const onMove = (moveEvent) => changeWidth(startWidth + (moveEvent.clientX - startX) * direction);
+          const onEnd = () => {
+            separator.classList.remove('dragging');
+            document.body.classList.remove('panel-resizing');
+            savePanelLayout();
+            separator.removeEventListener('pointermove', onMove);
+            separator.removeEventListener('pointerup', onEnd);
+            separator.removeEventListener('pointercancel', onEnd);
+          };
+          separator.addEventListener('pointermove', onMove);
+          separator.addEventListener('pointerup', onEnd);
+          separator.addEventListener('pointercancel', onEnd);
+        });
+        separator.addEventListener('keydown', (event) => {
+          const limits = columnLimits(panel);
+          const current = panel === 'library' ? panelLayout.libraryWidth : panelLayout.inspectorWidth;
+          const direction = panel === 'library' ? 1 : -1;
+          if (event.key === 'Home') changeWidth(limits.min);
+          else if (event.key === 'End') changeWidth(limits.max);
+          else if (event.key === 'ArrowLeft') changeWidth(current - 10 * direction);
+          else if (event.key === 'ArrowRight') changeWidth(current + 10 * direction);
+          else return;
+          event.preventDefault();
+          savePanelLayout();
+        });
+      }
+
+      function setMonitorRatio(ratio) {
+        const total = $('monitor').getBoundingClientRect().height + $('timelinePanel').getBoundingClientRect().height;
+        if (total <= 360) return;
+        const minRatio = 180 / total;
+        const safeRatio = Math.min(1 - minRatio, Math.max(minRatio, ratio));
+        panelLayout.monitorRatio = safeRatio;
+        $('workbench').style.setProperty('--monitor-fr', `${safeRatio * 100}fr`);
+        $('workbench').style.setProperty('--timeline-fr', `${(1 - safeRatio) * 100}fr`);
+        setSeparatorValue($('workbenchResizer'), safeRatio * 100, minRatio * 100, (1 - minRatio) * 100);
+      }
+
+      function setupWorkbenchResizer() {
+        const separator = $('workbenchResizer');
+        separator.addEventListener('pointerdown', (event) => {
+          if (event.button !== 0) return;
+          event.preventDefault();
+          separator.setPointerCapture(event.pointerId);
+          separator.classList.add('dragging');
+          document.body.classList.add('panel-resizing-horizontal');
+          const startY = event.clientY;
+          const startMonitorHeight = $('monitor').getBoundingClientRect().height;
+          const total = startMonitorHeight + $('timelinePanel').getBoundingClientRect().height;
+          const onMove = (moveEvent) => setMonitorRatio((startMonitorHeight + moveEvent.clientY - startY) / total);
+          const onEnd = () => {
+            separator.classList.remove('dragging');
+            document.body.classList.remove('panel-resizing-horizontal');
+            savePanelLayout();
+            separator.removeEventListener('pointermove', onMove);
+            separator.removeEventListener('pointerup', onEnd);
+            separator.removeEventListener('pointercancel', onEnd);
+          };
+          separator.addEventListener('pointermove', onMove);
+          separator.addEventListener('pointerup', onEnd);
+          separator.addEventListener('pointercancel', onEnd);
+        });
+        separator.addEventListener('keydown', (event) => {
+          const current = panelLayout.monitorRatio * 100;
+          if (event.key === 'Home') setMonitorRatio(0.25);
+          else if (event.key === 'End') setMonitorRatio(0.75);
+          else if (event.key === 'ArrowUp') setMonitorRatio((current - 2) / 100);
+          else if (event.key === 'ArrowDown') setMonitorRatio((current + 2) / 100);
+          else return;
+          event.preventDefault();
+          savePanelLayout();
+        });
+      }
+
+      function setupPanelResizers() {
+        try {
+          const saved = JSON.parse(localStorage.getItem(panelLayoutStorageKey) || 'null');
+          if (saved && typeof saved === 'object') {
+            if (Number.isFinite(saved.libraryWidth)) panelLayout.libraryWidth = saved.libraryWidth;
+            if (Number.isFinite(saved.inspectorWidth)) panelLayout.inspectorWidth = saved.inspectorWidth;
+            if (Number.isFinite(saved.monitorRatio)) panelLayout.monitorRatio = saved.monitorRatio;
+          }
+        } catch (error) {
+          console.warn('AutoEdit could not load the saved panel layout.', error);
+        }
+        setupColumnResizer('library');
+        setupColumnResizer('inspector');
+        setupWorkbenchResizer();
+        const applySavedLayout = () => {
+          if (!window.matchMedia('(min-width: 651px)').matches) return;
+          setColumnWidth('library', panelLayout.libraryWidth, true);
+          setColumnWidth('inspector', panelLayout.inspectorWidth, true);
+          setMonitorRatio(panelLayout.monitorRatio);
+        };
+        applySavedLayout();
+        window.addEventListener('resize', applySavedLayout);
+      }
+      const formatTime = (seconds, tenths = false) => {
+        if (!Number.isFinite(seconds)) return tenths ? '00:00.0' : '00:00';
+        const safe = Math.max(0, seconds);
+        const minutes = Math.floor(safe / 60).toString().padStart(2, '0');
+        const wholeSeconds = Math.floor(safe % 60).toString().padStart(2, '0');
+        return `${minutes}:${wholeSeconds}${tenths ? `.${Math.floor((safe % 1) * 10)}` : ''}`;
+      };
+      const formatSourceTime = (seconds, tenths = false) => {
+        if (!Number.isFinite(seconds) || seconds < 3600) return formatTime(seconds, tenths);
+        const safe = Math.max(0, seconds);
+        const hours = Math.floor(safe / 3600).toString().padStart(2, '0');
+        const minutes = Math.floor((safe % 3600) / 60).toString().padStart(2, '0');
+        const wholeSeconds = Math.floor(safe % 60).toString().padStart(2, '0');
+        return `${hours}:${minutes}:${wholeSeconds}${tenths ? `.${Math.floor((safe % 1) * 10)}` : ''}`;
+      };
+      const duration = () => state.audioBuffer?.duration || musicPlayer.duration || 0;
+      const getVideo = (id) => state.videos.find((video) => video.id === id);
+      const showNotice = (id, message) => { $(id).textContent = message; };
+      const makeUrl = (file) => { const url = URL.createObjectURL(file); state.objectUrls.add(url); return url; };
+      const getMediaPath = (file) => {
+        try { return desktopApi?.getPathForFile(file) || null; } catch { return null; }
+      };
+      const mediaUrl = (file) => makeUrl(file);
+
+      function sessionSnapshot() {
+        return {
+          version: 1,
+          music: state.music?.path ? { path: state.music.path, name: state.music.file.name, type: state.music.file.type } : null,
+          videos: state.videos.filter((video) => video.path).map((video) => ({ id: video.id, path: video.path, name: video.file.name, type: video.file.type, duration: video.duration })),
+          sections: state.sections,
+          edit: state.edit,
+          beatTimes: state.beatTimes,
+          beatCandidates: state.beatCandidates,
+          tempoBpm: state.tempoBpm,
+          activeSection: state.activeSection,
+          currentTime: musicPlayer.currentTime || 0,
+          cadence: $('cutCadence').value,
+          sensitivity: $('sensitivity').value,
+          musicAudioEnabled: state.musicAudioEnabled,
+          clipAudioEnabled: state.clipAudioEnabled,
+          previewResolution: state.previewResolution,
+          audioAnalyzed: Boolean(state.audioBuffer),
+          rangeDraft: {
+            start: $('rangeStart').value,
+            end: $('rangeEnd').value,
+            sourceIds: [...$('sourceSelect').selectedOptions].map((option) => option.value)
+          }
+        };
+      }
+
+      function persistSession(immediate = false) {
+        if (!desktopApi?.saveSession) {
+          if (state.music || state.videos.length) {
+            $('statusText').textContent = 'Browser preview cannot save media sessions. Use the AutoEdit desktop app.';
+          }
+          return;
+        }
+        clearTimeout(saveSessionTimer);
+        const save = () => {
+          try {
+            if (!desktopApi.saveSession(sessionSnapshot())) console.warn('AutoEdit could not save the current session.');
+          } catch (error) {
+            console.warn('AutoEdit could not save the current session.', error);
+          }
+        };
+        if (immediate) save();
+        else saveSessionTimer = setTimeout(save, 300);
+      }
+
+      async function readMusicBytes() {
+        if (state.music?.file.arrayBuffer) return state.music.file.arrayBuffer();
+        if (state.music?.path && desktopApi?.readAudioFile) return desktopApi.readAudioFile(state.music.path);
+        throw new Error('The audio file is not available in this session.');
+      }
+
+      async function decodeMusicBuffer() {
+        const bytes = await readMusicBytes();
+        const audioData = bytes instanceof ArrayBuffer
+          ? bytes
+          : bytes.buffer.slice(bytes.byteOffset, bytes.byteOffset + bytes.byteLength);
+        const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+        try {
+          return await audioContext.decodeAudioData(audioData);
+        } finally {
+          await audioContext.close();
+        }
+      }
+
+      function clearCurrentProject() {
+        musicPlayer.pause();
+        previewVideo.pause();
+        for (const url of state.objectUrls) URL.revokeObjectURL(url);
+        state.objectUrls.clear();
+        state.music = null;
+        state.audioBuffer = null;
+        state.beatTimes = [];
+        state.beatCandidates = [];
+        state.tempoBpm = 0;
+        state.videos = [];
+        state.sections = [];
+        state.edit = [];
+        state.activeSection = null;
+        state.activeCut = null;
+        musicPlayer.removeAttribute('src');
+        musicPlayer.load();
+        previewVideo.removeAttribute('src');
+        previewVideo.load();
+        cancelPreviewRendering();
+        previewCanvas.classList.add('hidden');
+        previewCanvas.width = 0;
+        previewCanvas.height = 0;
+        $('monitorEmpty').classList.remove('hidden');
+        $('monitorSource').textContent = 'No source selected';
+        $('musicList').innerHTML = '<div class="empty-note">Import a song to begin building your cut.</div>';
+        $('sectionList').innerHTML = '<div class="cut-empty">Add a range and assign at least one source.</div>';
+        $('rangeCount').textContent = '0 ranges';
+        $('beatCount').textContent = 'No edit points';
+        $('cutList').innerHTML = '<li class="cut-empty">Suggested cut points will appear here for review.</li>';
+        $('analysisLabel').textContent = 'Not analyzed';
+        $('analysisNotice').textContent = '';
+        $('generateNotice').textContent = '';
+        $('waveEmpty').classList.remove('hidden');
+        $('analyzeButton').disabled = true;
+        $('generateButton').disabled = true;
+        $('exportButton').disabled = true;
+        updateSourcesSelect();
+        renderVideos();
+        renderSections();
+        renderVideoTrack();
+        renderRangeOverlay();
+        updateDuration();
+        drawWaveform();
+        $('statusText').textContent = 'Open or create a project';
+      }
+
+      async function openProject() {
+        if (!desktopApi?.openProject) {
+          const message = 'Open project files and restore saved sessions in the AutoEdit desktop app.';
+          $('statusText').textContent = message;
+          showNotice('rangeNotice', message);
+          return;
+        }
+        if ((state.music || state.videos.length) && !window.confirm('Open another project and replace the current workspace?')) return;
+        try {
+          const project = await desktopApi.openProject();
+          if (!project) return;
+          clearCurrentProject();
+          $('projectName').textContent = project.name;
+          await restoreSession(project.session);
+          persistSession(true);
+        } catch (error) {
+          showNotice('rangeNotice', `Could not open project: ${error.message}`);
+        }
+      }
+
+      async function saveProject() {
+        if (!desktopApi?.saveProject) {
+          const message = 'Save project files and media sessions in the AutoEdit desktop app.';
+          $('statusText').textContent = message;
+          showNotice('rangeNotice', message);
+          return;
+        }
+        try {
+          const result = await desktopApi.saveProject({
+            name: $('projectName').textContent,
+            session: sessionSnapshot()
+          });
+          if (!result) return;
+          $('projectName').textContent = result.name;
+          showNotice('rangeNotice', `Saved project: ${result.name}`);
+          persistSession(true);
+        } catch (error) {
+          showNotice('rangeNotice', `Could not save project: ${error.message}`);
+        }
+      }
+
+      async function restoreSession(projectSession = null) {
+        if (!desktopApi?.loadSession && !projectSession) return;
+        try {
+          const session = projectSession || await desktopApi.loadSession();
+          if (!session || session.version !== 1) return;
+          $('cutCadence').value = ['1', '2', '4'].includes(String(session.cadence)) ? String(session.cadence) : '2';
+          $('sensitivity').value = String(session.sensitivity ?? 55);
+          $('sensitivityValue').textContent = `${$('sensitivity').value}%`;
+          state.previewResolution = ['full', 'half', 'quarter'].includes(session.previewResolution) ? session.previewResolution : 'full';
+          $('previewResolution').value = state.previewResolution;
+          state.musicAudioEnabled = session.musicAudioEnabled !== false;
+          state.clipAudioEnabled = session.clipAudioEnabled !== false;
+          updateAudioToggles();
+          state.videos = (session.videos || []).filter((video) => video.path && video.id).map((video) => ({
+            id: video.id,
+            path: video.path,
+            file: { name: video.name, type: video.type || 'video/*' },
+            url: desktopApi.pathToFileURL(video.path),
+            duration: Number(video.duration) || 0,
+            thumb: ''
+          }));
+          const videoIds = new Set(state.videos.map((video) => video.id));
+          state.sections = (session.sections || []).map((section) => ({
+            ...section,
+            sourceIds: section.sourceIds.filter((id) => videoIds.has(id))
+          })).filter((section) => section.sourceIds.length);
+          state.edit = (session.edit || []).filter((cut) => videoIds.has(cut.sourceId));
+          state.beatTimes = Array.isArray(session.beatTimes) ? session.beatTimes : [];
+          state.beatCandidates = Array.isArray(session.beatCandidates) ? session.beatCandidates : [];
+          state.tempoBpm = Number(session.tempoBpm) || 0;
+          state.activeSection = state.sections.some((section) => section.id === session.activeSection)
+            ? session.activeSection
+            : state.sections[0]?.id || null;
+          $('rangeStart').value = session.rangeDraft?.start ?? '0';
+          $('rangeEnd').value = session.rangeDraft?.end ?? '10';
+
+          if (session.music?.path) {
+            let file = { name: session.music.name, type: session.music.type || 'audio/*' };
+            let url = desktopApi.pathToFileURL(session.music.path);
+            try {
+              const bytes = await desktopApi.readAudioFile(session.music.path);
+              file = new File([bytes], session.music.name, { type: session.music.type || 'audio/*' });
+              url = makeUrl(file);
+            } catch (error) {
+              showNotice('analysisNotice', `Could not reopen the music file: ${error.message}`);
+            }
+            state.music = { file, path: session.music.path, url };
+            $('musicList').innerHTML = `<div class="asset selected music-asset" title="Double-click to fine-tune music analysis"><div class="asset-thumb">♫</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div><div class="asset-meta">Double-click to fine-tune analysis</div></div><span class="asset-action">♪</span></div>`;
+            $('trackName').textContent = file.name.toUpperCase();
+            $('analyzeButton').disabled = false;
+            musicPlayer.addEventListener('loadedmetadata', () => {
+              musicPlayer.currentTime = Math.max(0, Math.min(Number(session.currentTime) || 0, musicPlayer.duration || 0));
+              syncPreview(true);
+            }, { once: true });
+            musicPlayer.src = state.music.url;
+          }
+
+          updateSourcesSelect();
+          const selectedSources = new Set(session.rangeDraft?.sourceIds || []);
+          [...$('sourceSelect').options].forEach((option, index) => {
+            option.selected = selectedSources.size ? selectedSources.has(option.value) : index === 0;
+          });
+          renderVideos();
+          renderSections();
+          $('generateButton').disabled = !state.sections.length || !state.beatTimes.length;
+          $('exportButton').disabled = !state.edit.length;
+          if (state.tempoBpm) {
+            $('analysisLabel').textContent = `~${Math.round(state.tempoBpm)} BPM`;
+            $('beatCount').textContent = `${state.beatTimes.length} cuts · ${Math.round(state.tempoBpm)} BPM`;
+            $('cutList').innerHTML = state.beatTimes.length
+              ? state.beatTimes.slice(0, 12).map((time, index) => `<li class="cut-row"><span>Cut ${String(index + 1).padStart(2, '0')}</span><span>${formatTime(time, true)}</span></li>`).join('')
+              : '<li class="cut-empty">No saved cut points.</li>';
+            showNotice('analysisNotice', `Restored beat grid at ~${Math.round(state.tempoBpm)} BPM.`);
+          }
+          updateDuration();
+
+          if (state.music && session.audioAnalyzed) {
+            state.audioBuffer = await decodeMusicBuffer();
+            $('waveEmpty').classList.add('hidden');
+            updateDuration();
+            drawWaveform();
+            if ('ResizeObserver' in window) new ResizeObserver(drawWaveform).observe($('waveWrap'));
+            renderVideoTrack();
+          }
+          $('statusText').textContent = projectSession ? 'Project opened' : 'Last session restored';
+        } catch (error) {
+          showNotice('analysisNotice', `Could not restore the last session: ${error.message}`);
+        }
+      }
+
+      $('addMusic').addEventListener('click', () => musicInput.click());
+      $('addVideos').addEventListener('click', () => videoInput.click());
+      $('openProjectButton').addEventListener('click', openProject);
+      $('saveProjectButton').addEventListener('click', saveProject);
+      $('musicList').addEventListener('dblclick', async () => {
+        if (!state.music) return;
+        if (!desktopApi?.openAnalysisWindow || !state.music.path) {
+          showNotice('analysisNotice', 'Fine-tune analysis in the AutoEdit desktop app.');
+          return;
+        }
+        try {
+          await desktopApi.openAnalysisWindow({
+            filePath: state.music.path,
+            name: state.music.file.name,
+            sensitivity: Number($('sensitivity').value),
+            cadence: $('cutCadence').value
+          });
+        } catch (error) {
+          showNotice('analysisNotice', `Could not open the analysis window: ${error.message}`);
+        }
+      });
+      desktopApi?.onAnalysisSettings?.(({ sensitivity, cadence }) => {
+        $('sensitivity').value = String(sensitivity);
+        $('sensitivityValue').textContent = `${sensitivity}%`;
+        $('cutCadence').value = cadence;
+        if (state.audioBuffer) updateBeatAnalysis();
+        else analyzeMusic();
+      });
+      musicInput.addEventListener('change', () => { if (musicInput.files[0]) loadMusic(musicInput.files[0]); musicInput.value = ''; });
+      videoInput.addEventListener('change', () => { if (videoInput.files.length) addVideos([...videoInput.files]); videoInput.value = ''; });
+      $('sensitivity').addEventListener('input', () => {
+        $('sensitivityValue').textContent = `${$('sensitivity').value}%`;
+        if (state.audioBuffer) updateBeatAnalysis();
+        persistSession();
+      });
+      $('cutCadence').addEventListener('change', applyCutCadence);
+      monitorElement.addEventListener('contextmenu', (event) => {
+        event.preventDefault();
+        previewContextMenu.classList.remove('hidden');
+        const bounds = monitorElement.getBoundingClientRect();
+        const maxLeft = Math.max(0, monitorElement.clientWidth - previewContextMenu.offsetWidth);
+        const maxTop = Math.max(0, monitorElement.clientHeight - previewContextMenu.offsetHeight);
+        previewContextMenu.style.left = `${Math.max(0, Math.min(event.clientX - bounds.left - monitorElement.clientLeft, maxLeft))}px`;
+        previewContextMenu.style.top = `${Math.max(0, Math.min(event.clientY - bounds.top - monitorElement.clientTop, maxTop))}px`;
+        $('previewResolution').focus({ preventScroll: true });
+      });
+      document.addEventListener('pointerdown', (event) => {
+        if (event.button !== 2 && !previewContextMenu.contains(event.target)) closePreviewContextMenu();
+      });
+      $('previewResolution').addEventListener('change', () => {
+        state.previewResolution = $('previewResolution').value;
+        drawPreviewFrame();
+        persistSession(true);
+      });
+      $('rangeStart').addEventListener('input', persistSession);
+      $('rangeEnd').addEventListener('input', persistSession);
+      $('sourceSelect').addEventListener('change', persistSession);
+      $('addRangeButton').addEventListener('click', addRange);
+      $('analyzeButton').addEventListener('click', analyzeMusic);
+      $('generateButton').addEventListener('click', generateEdit);
+      $('playButton').addEventListener('click', togglePlayback);
+      $('musicAudioToggle').addEventListener('click', () => {
+        state.musicAudioEnabled = !state.musicAudioEnabled;
+        updateAudioToggles();
+        persistSession(true);
+      });
+      $('clipAudioToggle').addEventListener('click', () => {
+        state.clipAudioEnabled = !state.clipAudioEnabled;
+        updateAudioToggles();
+        persistSession(true);
+      });
+      $('previousButton').addEventListener('click', () => seekEditPoint(-1));
+      $('nextButton').addEventListener('click', () => seekEditPoint(1));
+      $('exportButton').addEventListener('click', exportEdit);
+      const waveWrap = $('waveWrap');
+      waveWrap.addEventListener('pointerdown', (event) => {
+        const handle = event.target.closest('[data-range-edge]');
+        if (!handle) return;
+        const section = state.sections.find((item) => item.id === handle.dataset.sectionId);
+        if (!section) return;
+        event.preventDefault();
+        rangeDrag = { sectionId: section.id, edge: handle.dataset.rangeEdge, pointerId: event.pointerId };
+        state.activeSection = section.id;
+        state.edit = [];
+        $('exportButton').disabled = true;
+        renderVideoTrack();
+        waveWrap.setPointerCapture(event.pointerId);
+      });
+      waveWrap.addEventListener('pointermove', updateRangeDrag);
+      waveWrap.addEventListener('pointerup', finishRangeDrag);
+      waveWrap.addEventListener('pointercancel', finishRangeDrag);
+      waveWrap.addEventListener('click', (event) => {
+        if (suppressWaveClick) {
+          suppressWaveClick = false;
+          return;
+        }
+        const rect = waveWrap.getBoundingClientRect();
+        const time = Math.max(0, Math.min(duration(), (event.clientX - rect.left) / rect.width * duration()));
+        const section = state.sections.find((item) => time >= item.start && time <= item.end);
+        if (section) {
+          selectSection(section.id);
+          return;
+        }
+        seekFromWaveform(event);
+      });
+      attachPlayheadDrag(waveWrap);
+      attachPlayheadDrag($('videoTrack'));
+      $('videoTrack').addEventListener('click', (event) => {
+        const clipElement = event.target.closest('[data-cut-index]');
+        if (!clipElement) return;
+        const cut = state.edit[Number(clipElement.dataset.cutIndex)];
+        if (!cut) return;
+        musicPlayer.currentTime = cut.start;
+        syncPreview(true);
+      });
+      window.addEventListener('resize', drawWaveform);
+      window.addEventListener('resize', closePreviewContextMenu);
+      window.addEventListener('keydown', (event) => {
+        if (event.key === 'Escape' && !previewContextMenu.classList.contains('hidden')) {
+          closePreviewContextMenu();
+          return;
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 's') {
+          event.preventDefault();
+          saveProject();
+          return;
+        }
+        if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === 'o') {
+          event.preventDefault();
+          openProject();
+          return;
+        }
+        if (!['Delete', 'Backspace'].includes(event.key) || !state.activeSection) return;
+        if (event.target instanceof Element && event.target.closest('input, select, textarea, [contenteditable="true"]')) return;
+        event.preventDefault();
+        removeSection(state.activeSection);
+      });
+      musicPlayer.addEventListener('timeupdate', syncPreview);
+      musicPlayer.addEventListener('play', () => { state.playing = true; updatePlayButton(); startFrameMonitoring(); });
+      musicPlayer.addEventListener('pause', () => { state.playing = false; previewVideo.pause(); stopFrameMonitoring(); updatePlayButton(); persistSession(); });
+      musicPlayer.addEventListener('ended', () => { state.playing = false; previewVideo.pause(); stopFrameMonitoring(); updatePlayButton(); });
+      musicPlayer.addEventListener('loadedmetadata', () => {
+        updateDuration();
+        ensureFullSongRange();
+      });
+      musicPlayer.addEventListener('error', () => {
+        const code = musicPlayer.error?.code;
+        showNotice('generateNotice', `Music playback failed${code ? ` (media error ${code})` : ''}. Re-import the track or check that the file is available.`);
+      });
+      previewVideo.addEventListener('loadedmetadata', () => syncPreview(true));
+      previewVideo.addEventListener('loadedmetadata', drawPreviewFrame);
+      previewVideo.addEventListener('seeked', drawPreviewFrame);
+      previewVideo.addEventListener('pause', () => {
+        cancelPreviewRendering();
+        drawPreviewFrame();
+      });
+      previewVideo.addEventListener('playing', schedulePreviewRendering);
+      previewVideo.addEventListener('error', () => {
+        setFrameIndicator('error', 'FRAME ERROR', 'Preview video could not be decoded; dropped frame metrics are unavailable.');
+        if (state.edit.length) showNotice('generateNotice', 'A source clip could not be decoded. Check its file path and codec.');
+      });
+      previewVideo.addEventListener('playing', sampleDroppedFrames);
+
+      const dropZone = $('dropZone');
+      for (const eventName of ['dragenter', 'dragover']) dropZone.addEventListener(eventName, (event) => { event.preventDefault(); dropZone.classList.add('dragging'); });
+      for (const eventName of ['dragleave', 'drop']) dropZone.addEventListener(eventName, (event) => { event.preventDefault(); dropZone.classList.remove('dragging'); });
+      dropZone.addEventListener('drop', (event) => {
+        const files = [...event.dataTransfer.files];
+        const audio = files.find((file) => file.type.startsWith('audio/'));
+        if (audio) loadMusic(audio);
+        addVideos(files.filter((file) => file.type.startsWith('video/')));
+      });
+
+      function loadMusic(file) {
+        if (state.music?.url?.startsWith('blob:')) URL.revokeObjectURL(state.music.url);
+        const filePath = getMediaPath(file);
+        state.music = { file, path: filePath, url: mediaUrl(file, filePath) };
+        state.audioBuffer = null;
+        state.beatTimes = [];
+        state.beatCandidates = [];
+        state.tempoBpm = 0;
+        state.edit = [];
+        state.sections = [];
+        state.activeSection = null;
+        renderVideoTrack();
+        renderRangeOverlay();
+        musicPlayer.pause();
+        musicPlayer.src = state.music.url;
+        $('musicList').innerHTML = `<div class="asset selected music-asset" title="Double-click to fine-tune music analysis"><div class="asset-thumb">♫</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div><div class="asset-meta">Double-click to fine-tune analysis</div></div><span class="asset-action">♪</span></div>`;
+        $('trackName').textContent = file.name.toUpperCase();
+        $('analyzeButton').disabled = false;
+        $('generateButton').disabled = true;
+        $('exportButton').disabled = true;
+        $('analysisLabel').textContent = 'Not analyzed';
+        $('cutList').innerHTML = '<li class="cut-empty">Suggested cut points will appear here for review.</li>';
+        $('sectionList').innerHTML = '<div class="cut-empty">Add a range and assign at least one source.</div>';
+        $('rangeCount').textContent = '0 ranges';
+        $('beatCount').textContent = 'No edit points';
+        $('analysisNotice').textContent = '';
+        $('generateNotice').textContent = '';
+        $('waveEmpty').classList.remove('hidden');
+        $('statusText').textContent = 'Analyze the track to find edit points';
+        previewCanvas.classList.add('hidden');
+        $('monitorEmpty').classList.remove('hidden');
+        $('monitorSource').textContent = 'No source selected';
+        updateDuration();
+        drawWaveform();
+        persistSession(true);
+      }
+
+      async function addVideos(files) {
+        for (const file of files) {
+          if (!file.type.startsWith('video/')) continue;
+          const filePath = getMediaPath(file);
+          const video = { id: crypto.randomUUID(), file, path: filePath, url: mediaUrl(file, filePath), duration: 0, thumb: '' };
+          state.videos.push(video);
+          const probe = document.createElement('video');
+          probe.preload = 'metadata';
+          probe.muted = true;
+          probe.src = video.url;
+          probe.addEventListener('loadedmetadata', () => {
+            video.duration = Number.isFinite(probe.duration) ? probe.duration : 0;
+            persistSession();
+            try {
+              probe.currentTime = Math.min(0.5, probe.duration / 2);
+              probe.addEventListener('seeked', () => {
+                const thumbCanvas = document.createElement('canvas');
+                thumbCanvas.width = 70;
+                thumbCanvas.height = 70;
+                thumbCanvas.getContext('2d').drawImage(probe, 0, 0, 70, 70);
+                video.thumb = thumbCanvas.toDataURL('image/jpeg', 0.65);
+                renderVideos();
+              }, { once: true });
+            } catch { renderVideos(); }
+            renderVideos();
+          }, { once: true });
+          probe.addEventListener('error', () => renderVideos(), { once: true });
+        }
+        renderVideos();
+        updateSourcesSelect();
+        ensureFullSongRange();
+        persistSession(true);
+      }
+
+      function ensureFullSongRange() {
+        const total = duration();
+        if (!state.music || !state.videos.length || !total || state.sections.length) return;
+        const section = {
+          id: crypto.randomUUID(),
+          start: 0,
+          end: total,
+          sourceIds: state.videos.map((video) => video.id)
+        };
+        state.sections.push(section);
+        state.activeSection = section.id;
+        $('rangeStart').value = '0';
+        $('rangeEnd').value = total.toFixed(1);
+        $('rangeEnd').max = total;
+        $('rangeStart').max = total;
+        [...$('sourceSelect').options].forEach((option) => {
+          option.selected = section.sourceIds.includes(option.value);
+        });
+        renderSections();
+        renderRangeOverlay();
+        drawWaveform();
+        renderVideoTrack();
+        showNotice('rangeNotice', 'Added all video sources as a range spanning the full song.');
+        persistSession(true);
+      }
+
+      function renderVideos() {
+        $('videoCount').textContent = `${state.videos.length} ${state.videos.length === 1 ? 'clip' : 'clips'}`;
+        if (!state.videos.length) {
+          $('videoList').innerHTML = '<div class="empty-note">Add camera angles or other footage sources.</div>';
+          return;
+        }
+        $('videoList').innerHTML = state.videos.map((video) => `<div class="asset ${state.activeCut?.sourceId === video.id ? 'selected' : ''}" data-video-id="${video.id}"><div class="asset-thumb">${video.thumb ? `<img src="${video.thumb}" alt="">` : '▶'}</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(video.file.name)}">${escapeHtml(video.file.name)}</div><div class="asset-meta">${video.duration ? formatSourceTime(video.duration) : 'Loading media'}</div></div><button class="asset-action" data-remove-video="${video.id}" aria-label="Remove ${escapeHtml(video.file.name)}">×</button></div>`).join('');
+        $('videoList').querySelectorAll('[data-video-id]').forEach((row) => row.addEventListener('click', (event) => {
+          if (event.target.closest('[data-remove-video]')) return;
+          const video = getVideo(row.dataset.videoId);
+          if (!video) return;
+          setPreviewSource(video, 0);
+          musicPlayer.pause();
+          renderVideos();
+        }));
+        $('videoList').querySelectorAll('[data-remove-video]').forEach((button) => button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          removeVideo(button.dataset.removeVideo);
+        }));
+      }
+
+      function removeVideo(id) {
+        const video = getVideo(id);
+        if (!video) return;
+        if (video.url.startsWith('blob:')) URL.revokeObjectURL(video.url);
+        state.videos = state.videos.filter((item) => item.id !== id);
+        state.sections.forEach((section) => { section.sourceIds = section.sourceIds.filter((sourceId) => sourceId !== id); });
+        state.edit = [];
+        state.activeCut = null;
+        renderVideoTrack();
+        renderVideos();
+        renderSections();
+        updateSourcesSelect();
+        $('generateButton').disabled = state.sections.length === 0 || state.beatTimes.length === 0;
+        $('exportButton').disabled = true;
+        $('monitorSource').textContent = 'No source selected';
+        persistSession(true);
+      }
+
+      function updateSourcesSelect() {
+        const select = $('sourceSelect');
+        const previous = new Set([...select.selectedOptions].map((option) => option.value));
+        select.innerHTML = state.videos.map((video) => `<option value="${video.id}">${escapeHtml(video.file.name)}</option>`).join('');
+        [...select.options].forEach((option, index) => { option.selected = previous.has(option.value) || (previous.size === 0 && index === 0); });
+      }
+
+      function addRange() {
+        const start = Number($('rangeStart').value);
+        const end = Number($('rangeEnd').value);
+        const sourceIds = [...$('sourceSelect').selectedOptions].map((option) => option.value);
+        if (!state.music) return showNotice('rangeNotice', 'Import a music track first.');
+        if (!sourceIds.length) return showNotice('rangeNotice', 'Add and assign at least one video source.');
+        if (!Number.isFinite(start) || !Number.isFinite(end) || start < 0 || end <= start) return showNotice('rangeNotice', 'Enter a start time before the end time.');
+        if (duration() && end > duration()) return showNotice('rangeNotice', `Range cannot extend past the end of the song (${formatTime(duration())}).`);
+        const overlap = state.sections.some((section) => start < section.end && end > section.start);
+        if (overlap) return showNotice('rangeNotice', 'Ranges cannot overlap in this first version.');
+        const section = { id: crypto.randomUUID(), start, end, sourceIds };
+        state.sections.push(section);
+        state.sections.sort((a, b) => a.start - b.start);
+        state.activeSection = section.id;
+        state.edit = [];
+        renderSections();
+        renderRangeOverlay();
+        drawWaveform();
+        renderVideoTrack();
+        $('generateButton').disabled = state.beatTimes.length === 0;
+        $('exportButton').disabled = true;
+        showNotice('rangeNotice', 'Range added. It will be filled using your assigned sources.');
+        persistSession(true);
+      }
+
+      function renderSections() {
+        $('rangeCount').textContent = `${state.sections.length} ${state.sections.length === 1 ? 'range' : 'ranges'}`;
+        if (!state.sections.length) {
+          $('sectionList').innerHTML = '<div class="cut-empty">Add a range and assign at least one source.</div>';
+          renderRangeOverlay();
+          return;
+        }
+        $('sectionList').innerHTML = state.sections.map((section, index) => {
+          const names = section.sourceIds.map((id) => getVideo(id)?.file.name).filter(Boolean);
+          return `<div class="section-row ${section.id === state.activeSection ? 'active' : ''}" data-section="${section.id}"><div><div class="section-row-name">Range ${String(index + 1).padStart(2, '0')} · ${names.map(escapeHtml).join(', ') || 'No sources'}</div><div class="section-row-meta">${formatTime(section.start, true)} — ${formatTime(section.end, true)}</div></div><button class="section-remove" data-remove-section="${section.id}" aria-label="Remove range">×</button></div>`;
+        }).join('');
+        renderRangeOverlay();
+        $('sectionList').querySelectorAll('[data-section]').forEach((row) => row.addEventListener('click', (event) => {
+          if (event.target.closest('[data-remove-section]')) return;
+          selectSection(row.dataset.section);
+        }));
+        $('sectionList').querySelectorAll('[data-remove-section]').forEach((button) => button.addEventListener('click', (event) => {
+          event.stopPropagation();
+          removeSection(button.dataset.removeSection);
+        }));
+      }
+
+      function selectSection(id) {
+        const section = state.sections.find((item) => item.id === id);
+        if (!section) return;
+        state.activeSection = section.id;
+        $('rangeStart').value = section.start.toFixed(1);
+        $('rangeEnd').value = section.end.toFixed(1);
+        renderSections();
+        musicPlayer.currentTime = section.start;
+        syncPreview(true);
+        persistSession();
+      }
+
+      function removeSection(id) {
+        state.sections = state.sections.filter((section) => section.id !== id);
+        if (state.activeSection === id) state.activeSection = state.sections[0]?.id || null;
+        state.edit = [];
+        state.activeCut = null;
+        renderSections();
+        drawWaveform();
+        renderVideoTrack();
+        $('generateButton').disabled = state.sections.length === 0 || state.beatTimes.length === 0;
+        $('exportButton').disabled = true;
+        if (state.activeSection) {
+          const section = state.sections.find((item) => item.id === state.activeSection);
+          $('rangeStart').value = section.start.toFixed(1);
+          $('rangeEnd').value = section.end.toFixed(1);
+        }
+        persistSession(true);
+      }
+
+      async function analyzeMusic() {
+        if (!state.music) return;
+        $('analyzeButton').disabled = true;
+        $('analysisLabel').textContent = 'Analyzing';
+        showNotice('analysisNotice', 'Reading the track locally…');
+        try {
+          state.audioBuffer = await decodeMusicBuffer();
+          updateBeatAnalysis();
+          $('waveEmpty').classList.add('hidden');
+          $('rangeEnd').value = state.audioBuffer.duration.toFixed(1);
+          $('rangeEnd').max = state.audioBuffer.duration;
+          $('rangeStart').max = state.audioBuffer.duration;
+          updateDuration();
+          drawWaveform();
+          persistSession(true);
+        } catch (error) {
+          $('analysisLabel').textContent = 'Could not analyze';
+          showNotice('analysisNotice', `This track could not be decoded by the browser: ${error.message}`);
+        } finally {
+          $('analyzeButton').disabled = false;
+        }
+      }
+
+      function findAccents(buffer, sensitivity) {
+        const channelCount = buffer.numberOfChannels;
+        const samplesPerFrame = Math.max(256, Math.floor(buffer.sampleRate * 0.025));
+        const frameDuration = samplesPerFrame / buffer.sampleRate;
+        const frameCount = Math.ceil(buffer.length / samplesPerFrame);
+        const envelope = new Float32Array(frameCount);
+        for (let channel = 0; channel < channelCount; channel++) {
+          const data = buffer.getChannelData(channel);
+          for (let frame = 0; frame < frameCount; frame++) {
+            const start = frame * samplesPerFrame;
+            const end = Math.min(data.length, start + samplesPerFrame);
+            let sum = 0;
+            for (let index = start; index < end; index++) sum += data[index] * data[index];
+            envelope[frame] += Math.sqrt(sum / Math.max(1, end - start)) / channelCount;
+          }
+        }
+        const flux = new Float32Array(frameCount);
+        for (let index = 2; index < frameCount; index++) flux[index] = Math.max(0, envelope[index] - envelope[index - 2]);
+        const sorted = [...flux].sort((a, b) => a - b);
+        const percentile = sorted[Math.min(sorted.length - 1, Math.floor(sorted.length * (1 - sensitivity * 0.55)))];
+        const mean = flux.reduce((sum, value) => sum + value, 0) / Math.max(1, flux.length);
+        const threshold = Math.max(percentile, mean * 1.25, 0.003);
+        const onsets = [];
+        const minGap = Math.max(1, Math.round(0.08 / frameDuration));
+        for (let index = 3; index < frameCount - 2; index++) {
+          const value = flux[index];
+          if (value < threshold || value < flux[index - 1] || value < flux[index + 1] || value < flux[index - 2] || value < flux[index + 2]) continue;
+          const previous = onsets[onsets.length - 1];
+          if (previous && index - previous.frame < minGap) {
+            if (value > previous.value) onsets[onsets.length - 1] = { frame: index, value };
+          } else onsets.push({ frame: index, value });
+        }
+        const periodFrames = estimateBeatPeriod(flux, frameDuration);
+        const phase = estimateBeatPhase(flux, periodFrames);
+        const tolerance = Math.max(1, Math.round(Math.min(0.18, periodFrames * frameDuration * 0.2) / frameDuration));
+        const beatCandidates = [];
+        for (let beatIndex = 0, frame = phase; frame < frameCount; beatIndex++, frame = Math.round(phase + beatIndex * periodFrames)) {
+          const nearest = onsets
+            .filter((onset) => Math.abs(onset.frame - frame) <= tolerance)
+            .sort((left, right) => right.value - left.value)[0];
+          beatCandidates.push({ beatIndex, time: frame * frameDuration, strength: nearest?.value || 0, hasAccent: Boolean(nearest) });
+        }
+        return { tempoBpm: 60 / (periodFrames * frameDuration), beatCandidates };
+      }
+
+      function estimateBeatPeriod(flux, frameDuration) {
+        const average = flux.reduce((sum, value) => sum + value, 0) / Math.max(1, flux.length);
+        const minLag = Math.max(1, Math.round(60 / 190 / frameDuration));
+        const maxLag = Math.min(Math.floor(flux.length / 2), Math.round(60 / 55 / frameDuration));
+        const correlation = (lag) => {
+          if (lag < 1 || lag >= flux.length) return 0;
+          let product = 0;
+          let leftEnergy = 0;
+          let rightEnergy = 0;
+          for (let index = lag; index < flux.length; index++) {
+            const left = flux[index] - average;
+            const right = flux[index - lag] - average;
+            product += left * right;
+            leftEnergy += left * left;
+            rightEnergy += right * right;
+          }
+          return product / Math.sqrt(leftEnergy * rightEnergy || 1);
+        };
+        const scores = [];
+        for (let lag = minLag; lag <= maxLag; lag++) {
+          scores.push({ lag, score: correlation(lag) });
+        }
+        const bestScore = Math.max(...scores.map((item) => item.score));
+        if (bestScore < 0.1) return Math.round(0.5 / frameDuration);
+        let bestLag = scores.find((item) => item.score >= bestScore * 0.88).lag;
+        const halfLag = Math.round(bestLag / 2);
+        if (halfLag >= minLag) {
+          const phase = estimateBeatPhase(flux, bestLag);
+          const radius = Math.max(1, Math.round(bestLag * 0.08));
+          const localPeak = (frame) => {
+            let strongest = 0;
+            for (let offset = -radius; offset <= radius; offset++) {
+              const candidate = frame + offset;
+              if (candidate >= 0 && candidate < flux.length) strongest = Math.max(strongest, flux[candidate]);
+            }
+            return strongest;
+          };
+          let onBeat = 0;
+          let offBeat = 0;
+          let count = 0;
+          for (let frame = phase; frame + bestLag < flux.length; frame += bestLag) {
+            onBeat += localPeak(frame);
+            offBeat += localPeak(frame + halfLag);
+            count++;
+          }
+          if (count && offBeat / count >= onBeat / count * 0.3) bestLag = halfLag;
+        }
+        return bestLag;
+      }
+
+      function estimateBeatPhase(flux, periodFrames) {
+        let bestPhase = 0;
+        let bestScore = -Infinity;
+        const radius = Math.max(1, Math.round(periodFrames * 0.08));
+        for (let phase = 0; phase < periodFrames; phase++) {
+          let total = 0;
+          let count = 0;
+          for (let frame = phase; frame < flux.length; frame += periodFrames) {
+            let strongest = 0;
+            for (let offset = -radius; offset <= radius; offset++) {
+              const candidate = frame + offset;
+              if (candidate >= 0 && candidate < flux.length) strongest = Math.max(strongest, flux[candidate]);
+            }
+            total += strongest;
+            count++;
+          }
+          const score = total / Math.max(1, count);
+          if (score > bestScore) {
+            bestScore = score;
+            bestPhase = phase;
+          }
+        }
+        return bestPhase;
+      }
+
+      function updateBeatAnalysis() {
+        const analysis = findAccents(state.audioBuffer, Number($('sensitivity').value) / 100);
+        state.tempoBpm = analysis.tempoBpm;
+        state.beatCandidates = analysis.beatCandidates;
+        $('analysisLabel').textContent = `~${Math.round(state.tempoBpm)} BPM`;
+        applyCutCadence();
+      }
+
+      function applyCutCadence() {
+        const cadence = Number($('cutCadence').value) || 2;
+        const selected = [];
+        for (let index = 0; index < state.beatCandidates.length; index += cadence) {
+          const group = state.beatCandidates.slice(index, index + cadence).filter((beat) => beat.hasAccent);
+          if (group.length) selected.push(group.reduce((strongest, beat) => beat.strength > strongest.strength ? beat : strongest).time);
+        }
+        state.beatTimes = selected.filter((time) => time > 0.12 && time < (state.audioBuffer?.duration || Infinity) - 0.12);
+        state.edit = [];
+        state.activeCut = null;
+        $('exportButton').disabled = true;
+        $('beatCount').textContent = `${state.beatTimes.length} cuts · ${Math.round(state.tempoBpm)} BPM`;
+        $('cutList').innerHTML = state.beatTimes.length
+          ? state.beatTimes.slice(0, 12).map((time, index) => `<li class="cut-row"><span>Cut ${String(index + 1).padStart(2, '0')}</span><span>${formatTime(time, true)}</span></li>`).join('')
+          : '<li class="cut-empty">No strong accents on this cadence. Increase sensitivity or choose every beat.</li>';
+        $('generateButton').disabled = !state.sections.length || !state.beatTimes.length;
+        $('statusText').textContent = `${state.beatTimes.length} cut points at ~${Math.round(state.tempoBpm)} BPM`;
+        showNotice('analysisNotice', `Beat grid estimated at ~${Math.round(state.tempoBpm)} BPM. Keeping the strongest accent every ${cadence === 4 ? 'bar' : cadence === 2 ? '2 beats' : 'beat'}.`);
+        drawWaveform();
+        renderVideoTrack();
+        persistSession();
+      }
+
+      function generateEdit() {
+        if (!state.sections.length || !state.beatTimes.length) return;
+        const plannedCuts = [];
+        let omittedCuts = 0;
+        for (const section of state.sections) {
+          const innerPoints = state.beatTimes.filter((time) => time > section.start + 0.15 && time < section.end - 0.15);
+          const boundaries = [section.start, ...innerPoints, section.end];
+          const sources = section.sourceIds.map(getVideo).filter((video) => video && video.duration > 0);
+          if (!sources.length) continue;
+          for (let index = 0; index < boundaries.length - 1; index++) {
+            const cut = { start: boundaries[index], end: boundaries[index + 1] };
+            const eligibleSources = sources.filter((video) => video.duration >= minimumSourceStart + (cut.end - cut.start));
+            if (!eligibleSources.length) {
+              omittedCuts++;
+              continue;
+            }
+            plannedCuts.push({ ...cut, sourceId: eligibleSources[index % eligibleSources.length].id });
+          }
+        }
+        const useDurations = new Map();
+        const longestCuts = new Map();
+        for (const cut of plannedCuts) {
+          const cutLength = cut.end - cut.start;
+          useDurations.set(cut.sourceId, (useDurations.get(cut.sourceId) || 0) + cutLength);
+          longestCuts.set(cut.sourceId, Math.max(longestCuts.get(cut.sourceId) || 0, cutLength));
+        }
+        const usedDurations = new Map();
+        const result = plannedCuts.map((cut) => {
+          const video = getVideo(cut.sourceId);
+          const cutLength = cut.end - cut.start;
+          const elapsed = usedDurations.get(video.id) || 0;
+          const totalUse = useDurations.get(video.id);
+          const lastValidStart = video.duration - longestCuts.get(video.id);
+          const sourceStart = totalUse > 0
+            ? minimumSourceStart + (lastValidStart - minimumSourceStart) * elapsed / totalUse
+            : minimumSourceStart;
+          usedDurations.set(video.id, elapsed + cutLength);
+          return { ...cut, sourceStart: Math.max(minimumSourceStart, Math.min(lastValidStart, sourceStart)) };
+        });
+        state.edit = result;
+        state.activeCut = null;
+        $('exportButton').disabled = result.length === 0;
+        $('statusText').textContent = `${result.length} clips in first pass`;
+        showNotice('generateNotice', result.length
+          ? `First pass ready: ${result.length} clips in chronological source order, starting at least 15 seconds into each source.${omittedCuts ? ` ${omittedCuts} clips omitted because their sources do not have enough footage after 15 seconds.` : ''}`
+          : 'No clips generated. Wait for source durations to load, or assign sources with enough footage after the first 15 seconds.');
+        drawWaveform();
+        renderVideoTrack();
+        syncPreview(true);
+        persistSession(true);
+      }
+
+      function setFrameIndicator(status, label, description) {
+        const indicator = $('frameIndicator');
+        indicator.dataset.status = status;
+        indicator.textContent = label;
+        indicator.title = description;
+        indicator.setAttribute('aria-label', description);
+      }
+
+      function sampleDroppedFrames() {
+        if (!state.playing) return;
+        if (!previewVideo.currentSrc || previewVideo.paused || previewVideo.ended) {
+          if (droppedFrameCount) {
+            setFrameIndicator('dropped', `DROPPED ${droppedFrameCount}`, `${droppedFrameCount} preview frames dropped during this playback.`);
+          } else if (previewVideo.getAttribute('src') && previewVideo.readyState < 2) {
+            setFrameIndicator('waiting', 'WAITING', 'Waiting for preview video frames.');
+          } else {
+            setFrameIndicator('idle', 'NO VIDEO', 'No preview video is currently playing.');
+          }
+          return;
+        }
+
+        const quality = typeof previewVideo.getVideoPlaybackQuality === 'function'
+          ? previewVideo.getVideoPlaybackQuality()
+          : null;
+        const currentDroppedFrames = Number.isFinite(quality?.droppedVideoFrames)
+          ? quality.droppedVideoFrames
+          : Number.isFinite(previewVideo.webkitDroppedFrameCount) ? previewVideo.webkitDroppedFrameCount : null;
+        if (currentDroppedFrames === null) {
+          setFrameIndicator('idle', 'METRICS N/A', 'Dropped frame metrics are not available for this preview.');
+          return;
+        }
+
+        if (lastDroppedFrameCount !== null && currentDroppedFrames >= lastDroppedFrameCount) {
+          droppedFrameCount += currentDroppedFrames - lastDroppedFrameCount;
+        }
+        lastDroppedFrameCount = currentDroppedFrames;
+        if (droppedFrameCount) {
+          setFrameIndicator('dropped', `DROPPED ${droppedFrameCount}`, `${droppedFrameCount} preview frames dropped during this playback.`);
+        } else {
+          setFrameIndicator('ok', 'FRAMES OK', 'No dropped preview frames detected during this playback.');
+        }
+      }
+
+      function startFrameMonitoring() {
+        clearInterval(frameSampleTimer);
+        droppedFrameCount = 0;
+        lastDroppedFrameCount = null;
+        setFrameIndicator('waiting', 'WAITING', 'Waiting for preview video frames.');
+        sampleDroppedFrames();
+        frameSampleTimer = setInterval(sampleDroppedFrames, 500);
+      }
+
+      function stopFrameMonitoring() {
+        clearInterval(frameSampleTimer);
+        frameSampleTimer = null;
+        lastDroppedFrameCount = null;
+        if ($('frameIndicator').dataset.status === 'waiting') {
+          setFrameIndicator('idle', 'FRAME STATUS', 'Dropped frame status appears during preview playback.');
+        }
+      }
+
+      function drawPreviewFrame() {
+        if (!previewContext || !previewVideo.videoWidth || !previewVideo.videoHeight) return;
+        const scale = state.previewResolution === 'quarter' ? 0.25 : state.previewResolution === 'half' ? 0.5 : 1;
+        const width = Math.max(1, Math.round(previewVideo.videoWidth * scale));
+        const height = Math.max(1, Math.round(previewVideo.videoHeight * scale));
+        if (previewCanvas.width !== width || previewCanvas.height !== height) {
+          previewCanvas.width = width;
+          previewCanvas.height = height;
+        }
+        previewContext.drawImage(previewVideo, 0, 0, width, height);
+      }
+
+      function closePreviewContextMenu() {
+        previewContextMenu.classList.add('hidden');
+      }
+
+      function cancelPreviewRendering() {
+        if (previewFrameCallbackId !== null && typeof previewVideo.cancelVideoFrameCallback === 'function') {
+          previewVideo.cancelVideoFrameCallback(previewFrameCallbackId);
+        }
+        if (previewAnimationFrameId !== null) cancelAnimationFrame(previewAnimationFrameId);
+        previewFrameCallbackId = null;
+        previewAnimationFrameId = null;
+      }
+
+      function schedulePreviewRendering() {
+        if (previewVideo.paused || previewVideo.ended) return;
+        if (typeof previewVideo.requestVideoFrameCallback === 'function') {
+          previewFrameCallbackId = previewVideo.requestVideoFrameCallback(() => {
+            previewFrameCallbackId = null;
+            drawPreviewFrame();
+            schedulePreviewRendering();
+          });
+          return;
+        }
+        previewAnimationFrameId = requestAnimationFrame(() => {
+          previewAnimationFrameId = null;
+          drawPreviewFrame();
+          schedulePreviewRendering();
+        });
+      }
+
+      function syncPreview(force = false) {
+        const time = musicPlayer.currentTime || 0;
+        $('timeDisplay').textContent = formatTime(time, true);
+        $('monitorTime').textContent = `TIMECODE ${formatTime(time, true)}`;
+        const total = duration();
+        $('playhead').style.left = `${total ? Math.min(100, time / total * 100) : 0}%`;
+        const cut = state.edit.find((item) => time >= item.start && time < item.end);
+        if (cut) {
+          const video = getVideo(cut.sourceId);
+          if (video) {
+            if (force || state.activeCut !== cut || previewVideo.src !== video.url) {
+              state.activeCut = cut;
+              setPreviewSource(video, cut.sourceStart + time - cut.start);
+            }
+            if (state.playing && previewVideo.paused) previewVideo.play().catch(() => {});
+            $('monitorSource').textContent = `${video.file.name} · ${formatSourceTime(cut.sourceStart + time - cut.start, true)}`;
+          }
+        } else if (state.edit.length) {
+          previewVideo.pause();
+          $('monitorSource').textContent = 'Outside assigned ranges';
+        }
+        renderPlayhead();
+      }
+
+      function setPreviewSource(video, offset) {
+        if (previewVideo.src !== video.url) {
+          cancelPreviewRendering();
+          lastDroppedFrameCount = null;
+          previewVideo.src = video.url;
+          previewCanvas.classList.remove('hidden');
+          $('monitorEmpty').classList.add('hidden');
+          previewVideo.addEventListener('loadedmetadata', () => {
+            previewVideo.currentTime = Math.max(0, Math.min(offset, video.duration ? video.duration - 0.05 : 0));
+            drawPreviewFrame();
+            if (state.playing) previewVideo.play().catch(() => {});
+          }, { once: true });
+        } else if (video.duration) {
+          previewVideo.currentTime = Math.max(0, Math.min(offset, video.duration - 0.05));
+          drawPreviewFrame();
+        }
+        $('monitorSource').textContent = video.file.name;
+      }
+
+      function togglePlayback() {
+        if (!state.music) return;
+        if (musicPlayer.paused) {
+          if (duration() && musicPlayer.currentTime >= duration()) musicPlayer.currentTime = 0;
+          musicPlayer.play().then(syncPreview).catch((error) => showNotice('generateNotice', `Music playback could not start: ${error.message}`));
+        } else musicPlayer.pause();
+      }
+
+      function updateAudioToggles() {
+        musicPlayer.muted = !state.musicAudioEnabled;
+        previewVideo.muted = !state.clipAudioEnabled;
+        $('musicAudioToggle').textContent = state.musicAudioEnabled ? 'On' : 'Off';
+        $('musicAudioToggle').setAttribute('aria-pressed', String(state.musicAudioEnabled));
+        $('musicAudioToggle').setAttribute('aria-label', state.musicAudioEnabled ? 'Mute music track' : 'Unmute music track');
+        $('clipAudioToggle').textContent = state.clipAudioEnabled ? 'On' : 'Off';
+        $('clipAudioToggle').setAttribute('aria-pressed', String(state.clipAudioEnabled));
+        $('clipAudioToggle').setAttribute('aria-label', state.clipAudioEnabled ? 'Mute source clip audio' : 'Unmute source clip audio');
+      }
+
+      function updatePlayButton() {
+        $('playButton').textContent = state.playing ? 'Ⅱ' : '▶';
+        $('playButton').setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
+      }
+
+      function seekFromWaveform(event) {
+        if (!duration()) return;
+        const rect = $('waveWrap').getBoundingClientRect();
+        musicPlayer.currentTime = Math.max(0, Math.min(duration(), (event.clientX - rect.left) / rect.width * duration()));
+        syncPreview(true);
+        persistSession();
+      }
+
+      function seekEditPoint(direction) {
+        if (!duration()) return;
+        const points = state.edit.length ? state.edit.map((cut) => cut.start) : state.beatTimes;
+        const currentTime = musicPlayer.currentTime || 0;
+        const target = direction < 0
+          ? [...points].filter((point) => point < currentTime - 0.05).pop() ?? 0
+          : points.find((point) => point > currentTime + 0.05) ?? duration();
+        musicPlayer.currentTime = target;
+        syncPreview(true);
+        persistSession();
+      }
+
+      function attachPlayheadDrag(container) {
+        container.addEventListener('pointerdown', (event) => {
+          if (!event.target.closest('.playhead')) return;
+          event.preventDefault();
+          playheadDrag = { pointerId: event.pointerId, container };
+          container.setPointerCapture(event.pointerId);
+          seekToTimelineX(event.clientX, container);
+        });
+        container.addEventListener('pointermove', (event) => {
+          if (playheadDrag?.pointerId === event.pointerId && playheadDrag.container === container) seekToTimelineX(event.clientX, container);
+        });
+        container.addEventListener('pointerup', (event) => {
+          if (playheadDrag?.pointerId !== event.pointerId || playheadDrag.container !== container) return;
+          playheadDrag = null;
+          suppressWaveClick = container === waveWrap;
+          persistSession();
+        });
+        container.addEventListener('pointercancel', (event) => {
+          if (playheadDrag?.pointerId === event.pointerId && playheadDrag.container === container) playheadDrag = null;
+        });
+      }
+
+      function seekToTimelineX(clientX, container) {
+        if (!duration()) return;
+        const rect = container.getBoundingClientRect();
+        const progress = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+        musicPlayer.currentTime = progress * duration();
+        syncPreview(true);
+      }
+
+      function updateRangeDrag(event) {
+        if (!rangeDrag || rangeDrag.pointerId !== event.pointerId) return;
+        const section = state.sections.find((item) => item.id === rangeDrag.sectionId);
+        if (!section) return;
+        const ordered = [...state.sections].sort((a, b) => a.start - b.start);
+        const index = ordered.findIndex((item) => item.id === section.id);
+        const previous = ordered[index - 1];
+        const next = ordered[index + 1];
+        const rect = waveWrap.getBoundingClientRect();
+        const time = Math.max(0, Math.min(duration(), (event.clientX - rect.left) / rect.width * duration()));
+        if (rangeDrag.edge === 'start') {
+          const lower = previous ? previous.end : 0;
+          const upper = Math.min(section.end - 0.1, next ? next.start - 0.1 : duration());
+          section.start = Math.max(lower, Math.min(upper, time));
+        } else {
+          const lower = section.start + 0.1;
+          const upper = next ? next.start : duration();
+          section.end = Math.max(lower, Math.min(upper, time));
+        }
+        if (state.activeSection === section.id) {
+          $('rangeStart').value = section.start.toFixed(1);
+          $('rangeEnd').value = section.end.toFixed(1);
+        }
+        renderRangeOverlay();
+      }
+
+      function finishRangeDrag(event) {
+        if (!rangeDrag || rangeDrag.pointerId !== event.pointerId) return;
+        rangeDrag = null;
+        suppressWaveClick = true;
+        renderSections();
+        drawWaveform();
+        renderVideoTrack();
+        showNotice('rangeNotice', 'Range updated. Drag either edge to fine-tune it.');
+        persistSession(true);
+      }
+
+      function renderRangeOverlay() {
+        const overlay = $('rangeOverlay');
+        const total = duration();
+        if (!overlay || !total || !state.sections.length) {
+          if (overlay) overlay.innerHTML = '';
+          return;
+        }
+        const sections = [...state.sections].sort((a, b) => a.start - b.start);
+        overlay.innerHTML = sections.map((section, index) => {
+          const left = section.start / total * 100;
+          const width = (section.end - section.start) / total * 100;
+          const label = width >= 9 ? `<span class="range-visual-label">R${index + 1} · ${formatTime(section.start)}-${formatTime(section.end)}</span>` : '';
+          return `<div class="range-visual ${section.id === state.activeSection ? 'active' : ''}" data-section-id="${section.id}" style="left:${left}%;width:${width}%" title="Range ${index + 1}: ${formatTime(section.start)} to ${formatTime(section.end)}">${label}<button class="range-handle start" data-range-edge="start" data-section-id="${section.id}" aria-label="Adjust range ${index + 1} start"></button><button class="range-handle end" data-range-edge="end" data-section-id="${section.id}" aria-label="Adjust range ${index + 1} end"></button></div>`;
+        }).join('');
+      }
+
+      function updateDuration() {
+        const total = duration();
+        $('musicDuration').textContent = state.music ? (total ? formatTime(total) : 'Loading') : 'No track';
+        $('timelineDuration').textContent = formatTime(duration());
+        $('rangeLimitHint').textContent = total ? `Song length: ${formatTime(total)}. Ranges stay within the song.` : 'The song length sets the maximum range.';
+        if (duration()) {
+          $('rangeEnd').max = duration();
+          $('rangeStart').max = duration();
+        }
+        renderRuler();
+        renderRangeOverlay();
+      }
+
+      function renderRuler() {
+        const total = duration();
+        if (!total) {
+          $('timeRuler').innerHTML = '';
+          return;
+        }
+        const rawStep = total / 8;
+        const magnitude = 10 ** Math.floor(Math.log10(rawStep));
+        const normalized = rawStep / magnitude;
+        const step = magnitude * (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10);
+        const ticks = [];
+        for (let time = 0; time < total; time += step) ticks.push(time);
+        if (total - ticks[ticks.length - 1] > step * 0.35) ticks.push(total);
+        $('timeRuler').innerHTML = ticks.map((time, index) => `<span class="ruler-mark ${index === ticks.length - 1 ? 'edge' : ''}" style="left:${time / total * 100}%">${formatTime(time)}</span>`).join('');
+      }
+
+      function renderVideoTrack() {
+        const lane = $('videoTrack');
+        if (!lane) return;
+        const total = duration();
+        const colors = ['#c9ef74', '#83b9d1', '#ff806b', '#d8a56a', '#bcb7ea'];
+        const clips = total ? state.edit.map((cut, index) => {
+          const video = getVideo(cut.sourceId);
+          if (!video) return '';
+          const left = cut.start / total * 100;
+          const width = (cut.end - cut.start) / total * 100;
+          const color = colors[state.videos.indexOf(video) % colors.length];
+          const label = width >= 8 ? escapeHtml(video.file.name) : '';
+          const title = `${formatTime(cut.start, true)}-${formatTime(cut.end, true)} · ${video.file.name} at ${formatSourceTime(cut.sourceStart, true)}`;
+          return `<button type="button" class="video-clip" data-cut-index="${index}" style="left:${left}%;width:${width}%;--clip-color:${color}" title="${escapeHtml(title)}">${label}</button>`;
+        }).join('') : '';
+        lane.innerHTML = `${clips || '<div class="video-track-empty">Generated video clips appear here</div>'}<div class="playhead track-playhead" id="trackPlayhead"></div>`;
+        $('trackPlayhead').style.left = `${total ? Math.min(100, musicPlayer.currentTime / total * 100) : 0}%`;
+      }
+
+      function drawWaveform() {
+        const rect = canvas.getBoundingClientRect();
+        const ratio = window.devicePixelRatio || 1;
+        canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+        canvas.height = Math.max(1, Math.floor(rect.height * ratio));
+        context.setTransform(ratio, 0, 0, ratio, 0, 0);
+        const width = rect.width;
+        const height = rect.height;
+        context.clearRect(0, 0, width, height);
+        if (!state.audioBuffer) {
+          renderPlayhead();
+          return;
+        }
+        const data = state.audioBuffer.getChannelData(0);
+        const middle = height / 2;
+        const step = Math.max(1, Math.floor(data.length / width));
+        context.fillStyle = '#9ab84d';
+        for (let x = 0; x < width; x++) {
+          const start = x * step;
+          const end = Math.min(data.length, start + step);
+          let peak = 0;
+          for (let index = start; index < end; index++) peak = Math.max(peak, Math.abs(data[index]));
+          const barHeight = Math.max(1, peak * (height * 0.82));
+          context.fillRect(x, middle - barHeight / 2, 1, barHeight);
+        }
+        const total = duration();
+        for (const time of state.beatTimes) {
+          const x = time / total * width;
+          context.fillStyle = '#ff806b';
+          context.fillRect(x, 0, 1, height);
+        }
+        for (const section of state.sections) {
+          const x = section.start / total * width;
+          const rangeWidth = (section.end - section.start) / total * width;
+          context.fillStyle = '#83b9d122';
+          context.fillRect(x, 0, rangeWidth, height);
+          context.strokeStyle = '#83b9d1';
+          context.strokeRect(x, 0, rangeWidth, height);
+        }
+        renderPlayhead();
+      }
+
+      function renderPlayhead() {
+        const total = duration();
+        $('playhead').style.left = `${total ? Math.min(100, musicPlayer.currentTime / total * 100) : 0}%`;
+        $('trackPlayhead').style.left = `${total ? Math.min(100, musicPlayer.currentTime / total * 100) : 0}%`;
+      }
+
+      function exportEdit() {
+        if (!state.edit.length) return;
+        const rows = [['music_start_seconds', 'music_end_seconds', 'duration_seconds', 'source', 'source_in_seconds', 'source_out_seconds']];
+        for (const cut of state.edit) {
+          const source = getVideo(cut.sourceId);
+          rows.push([cut.start.toFixed(3), cut.end.toFixed(3), (cut.end - cut.start).toFixed(3), source?.file.name || '', cut.sourceStart.toFixed(3), (cut.sourceStart + cut.end - cut.start).toFixed(3)]);
+        }
+        const csv = rows.map((row) => row.map((value) => `"${String(value).replaceAll('"', '""')}"`).join(',')).join('\r\n');
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv' }));
+        link.download = 'autoedit-first-pass.csv';
+        link.click();
+        URL.revokeObjectURL(link.href);
+      }
+
+      function escapeHtml(value) {
+        return value.replace(/[&<>"']/g, (character) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[character]);
+      }
+
+      updatePlayButton();
+      updateSourcesSelect();
+      updateDuration();
+      drawWaveform();
+      renderVideoTrack();
+      renderRangeOverlay();
+      musicPlayer.volume = 0.8;
+      previewVideo.volume = 0.65;
+      updateAudioToggles();
+      setupPanelResizers();
+      restoreSession();
+      if (!desktopApi) $('statusText').textContent = 'Browser preview only. Session auto-save requires the AutoEdit desktop app.';
+      window.addEventListener('beforeunload', () => {
+        persistSession(true);
+        state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
+      });
+    })();
+  </script>
+</body>
+</html>

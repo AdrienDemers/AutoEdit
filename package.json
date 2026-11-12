@@ -1,0 +1,32 @@
+{
+  "name": "autoedit-desktop",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {
+    "node": ">=22.12.0"
+  },
+  "description": "A music-driven multi-source video editing workspace",
+  "main": "electron/main.cjs",
+  "scripts": {
+    "start": "electron .",
+    "dist": "electron-builder --win nsis"
+  },
+  "build": {
+    "appId": "com.autoedit.desktop",
+    "productName": "AutoEdit",
+    "files": [
+      "electron/**/*",
+      "index.html",
+      "PRODUCT_DESCRIPTION.md",
+      "package.json"
+    ],
+    "win": {
+      "target": "nsis",
+      "artifactName": "AutoEdit-${version}-Setup.${ext}"
+    }
+  },
+  "devDependencies": {
+    "electron": "^45.3.0",
+    "electron-builder": "^26.18.0"
+  }
+}
