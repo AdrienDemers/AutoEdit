@@ -10,6 +10,7 @@ const projectMediaPaths = new WeakMap();
 const videoExports = new WeakMap();
 const analysisWindows = new WeakMap();
 const analysisWindowOwners = new WeakMap();
+const { registerFootageAnalysis } = require('./footage-analysis.cjs');
 
 const mediaPathsFor = (session) => new Set([
   session?.music?.path,
@@ -24,6 +25,14 @@ function readSession() {
     throw error;
   }
 }
+
+registerFootageAnalysis({
+  app, ipcMain,
+  allowedPaths: (sender) => new Set([
+    ...(projectMediaPaths.get(sender) || []),
+    ...mediaPathsFor(readSession())
+  ])
+});
 
 ipcMain.handle('session:load', () => readSession());
 

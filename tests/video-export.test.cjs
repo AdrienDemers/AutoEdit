@@ -13,6 +13,7 @@ function harness({ failSeek = false, failDraw = false } = {}) {
   const intervals = new Map();
   const timeouts = new Map();
   const events = [];
+  const gains = [];
   const videos = [];
   let nextId = 0;
   let recorder;
@@ -54,6 +55,7 @@ function harness({ failSeek = false, failDraw = false } = {}) {
   }
   const nodes = new Map();
   const sandbox = {
+    endAudioScrub() {},
     AbortController, console: { error() {}, warn() {} },
     setTimeout: (callback, delay) => { const id = ++nextId; timeouts.set(id, { callback, delay }); return id; },
     clearTimeout: (id) => timeouts.delete(id),
@@ -68,7 +70,9 @@ function harness({ failSeek = false, failDraw = false } = {}) {
       createMediaStreamDestination() { return { stream: { getAudioTracks: () => [] } }; }
       createMediaElementSource() { return { connect: (gain) => gain }; }
       createGain() {
-        return { gain: { setValueAtTime() {} }, connect() {} };
+        const node = { gain: { setValueAtTime() {} }, connect() {} };
+        gains.push(node);
+        return node;
       }
       async resume() {}
       async close() { this.state = 'closed'; }
@@ -81,7 +85,7 @@ function harness({ failSeek = false, failDraw = false } = {}) {
         return video;
       }
       return {
-        captureStream: () => ({ addTrack() {}, getTracks: () => [] }),
+        captureStream: () => { events.push('capture'); return { addTrack() {}, getTracks: () => [] }; },
         getContext: () => ({
           fillRect() {},
           drawImage() {
@@ -96,7 +100,7 @@ function harness({ failSeek = false, failDraw = false } = {}) {
       return nodes.get(id);
     },
     state: {
-      music: { url: 'music' }, musicAudioEnabled: true, clipAudioEnabled: true,
+      music: { url: 'music' }, musicAudioEnabled: true, clipAudioEnabled: true, musicVolume: 0.8,
       edit: [
         { start: 0, end: 1, sourceId: 'video', sourceStart: 105.9 },
         { start: 1, end: 2, sourceId: 'video', sourceStart: 200 }
@@ -112,13 +116,15 @@ function harness({ failSeek = false, failDraw = false } = {}) {
     getVideo: () => ({ file: { name: 'camera.mp4' }, url: 'source', duration: 300 }),
     duration: () => 2,
     showNotice: (_id, message) => events.push(message),
+    renderFootageAnalysis() {},
+    colors: { render: (context, source, _settings, ...coordinates) => context.drawImage(source, ...coordinates) },
     formatSourceTime: String,
     formatTime: String
   };
   vm.createContext(sandbox);
   vm.runInContext(exportCode, sandbox);
   return {
-    sandbox, videos, events, frames, intervals, timeouts,
+    sandbox, videos, events, frames, intervals, timeouts, gains, nodes,
     get music() { return music; },
     get recorder() { return recorder; },
     async frame() {
@@ -130,10 +136,50 @@ function harness({ failSeek = false, failDraw = false } = {}) {
     async cancel() {
       sandbox.activeExport.cancelled = true;
       sandbox.activeExport.controller.abort();
-      if (recorder.state !== 'inactive') recorder.stop();
+      if (recorder && recorder.state !== 'inactive') recorder.stop();
       await flush();
     }
   };
+}
+
+test('export applies the source grade consistently across multiple clips from that source', async () => {
+  const h = harness();
+  const settings = { exposure: 1 };
+  const grades = [];
+  h.sandbox.getVideo = () => ({ file: { name: 'camera.mp4' }, url: 'source', duration: 300, color: settings });
+  h.sandbox.colors.render = (context, source, color, ...coordinates) => { grades.push(color); context.drawImage(source, ...coordinates); };
+  const result = h.sandbox.exportVideo();
+  await flush();
+  await h.frame();
+  h.videos[0].completeSeek();
+  await flush();
+  h.music.position = 1;
+  await h.frame();
+  h.videos[0].completeSeek();
+  await flush();
+  h.music.position = 2;
+  await h.frame();
+  await result;
+  assert.equal(grades.length, 2);
+  assert.ok(grades.every((grade) => grade === settings));
+  assert.ok(h.events.includes('finish'));
+});
+
+for (const enabled of [true, false]) {
+  test(`export uses selected music volume and respects mute (${enabled})`, async () => {
+    const h = harness();
+    h.sandbox.state.musicVolume = 0.23;
+    h.sandbox.state.musicAudioEnabled = enabled;
+    const result = h.sandbox.exportVideo();
+    await flush();
+    assert.equal(h.gains[0].gain.value, enabled ? 0.23 : 0);
+    assert.equal(h.music.volume, 1);
+    assert.equal(h.nodes.get('musicVolume').disabled, true);
+    await h.cancel();
+    await h.frame();
+    await result;
+    assert.equal(h.nodes.get('musicVolume').disabled, false);
+  });
 }
 
 for (const differentSource of [false, true]) {
@@ -146,13 +192,14 @@ for (const differentSource of [false, true]) {
     const player = h.videos[0];
     assert.equal(player.currentTime, 105.9);
     assert.equal(h.music.paused, true);
-    assert.equal(h.recorder.state, 'inactive');
+    assert.equal(h.recorder, undefined);
     assert.equal(h.frames.size, 0);
     player.completeSeek();
     await flush();
     assert.equal(h.recorder.state, 'recording');
     assert.equal(h.music.paused, false);
     assert.ok(h.events.indexOf('draw') < h.events.indexOf('start'));
+    assert.ok(h.events.indexOf('draw') < h.events.indexOf('capture'));
     h.music.position = 1;
     await h.frame();
     const nextPlayer = differentSource ? h.videos[1] : player;

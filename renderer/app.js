@@ -1,5 +1,18 @@
 (() => {
-  const state = { music: null, audioBuffer: null, beatTimes: [], beatCandidates: [], tempoBpm: 0, videos: [], edit: [], activeCut: null, objectUrls: new Set(), playing: false, musicAudioEnabled: true, clipAudioEnabled: true, previewResolution: 'full' };
+  const state = { music: null, audioBuffer: null, musicEnergy: [], beatTimes: [], detectedCutTimes: [], musicCutOverrides: { added: [], removed: [] }, beatCandidates: [], tempoBpm: 0, videos: [], edit: [], activeCut: null, objectUrls: new Set(), playing: false, musicAudioEnabled: true, clipAudioEnabled: true, musicVolume: 0.8, scrubAudioEnabled: false, useFootageAnalysis: true, previewResolution: 'full', workspace: 'editing', analysisTarget: 'music', analysisTime: 0 };
+  const footage = window.AutoEditFootage;
+  const accents = window.AutoEditAccents;
+  const colors = window.AutoEditColor;
+  const audioScrubber = new window.AutoEditAudioScrubber((error) => {
+    showNotice('generateNotice', `Audio scrubbing failed: ${error.message}`, 'warning');
+  });
+  const rangeKinds = { speech: 'Speech', clapping: 'Clapping', motion: 'Motion' };
+  let selectedAccentTime = null;
+  let selectedRangeIndex = null;
+  let selectedCutIndex = null;
+  let rangeKind = 'speech';
+  let sourceDrag = null;
+  let sourceSlipDrag = null;
   const $ = (id) => document.getElementById(id);
   const panelLayoutStorageKey = 'autoedit-panel-layout';
   const panelLayout = { libraryWidth: 248, inspectorWidth: 268, monitorRatio: 0.6 };
@@ -8,16 +21,31 @@
   const musicPlayer = $('musicPlayer');
   const previewVideo = $('previewVideo');
   let activePreviewVideo = previewVideo;
+  let previewSourceId = null;
+  let colorPreviewError = null;
   const previewCanvas = $('previewCanvas');
   const monitorElement = $('monitor');
   const previewContextMenu = $('previewContextMenu');
+  const clipSlipOverlay = $('clipSlipOverlay');
+  const clipSlipPreview = $('clipSlipPreview');
+  const clipSlipTrack = $('clipSlipTrack');
+  const clipSlipWindow = $('clipSlipWindow');
   const previewContext = previewCanvas.getContext('2d', { alpha: false });
   previewVideo.preload = 'metadata';
   const canvas = $('waveform');
   const context = canvas.getContext('2d');
   const desktopApi = window.autoEditDesktop || null;
   let activeExport = null;
+  let footageTask = null;
+  let musicAnalysisTask = null;
+  const timelineZoom = { music: 1, footage: 1 };
+  const maximumTimelineZoom = 64;
+  const trackHeaderWidth = 82;
+  let navigatorDrag = null;
   let playheadDrag = null;
+  let resumeAfterScrub = false;
+  let musicAccentDrag = null;
+  let playheadAnimationFrameId = null;
   let suppressWaveClick = false;
   let saveSessionTimer = null;
   let frameSampleTimer = null;
@@ -119,6 +147,7 @@
   function setExportAvailability(available) {
     $('exportButton').disabled = !available;
     const reasons = [];
+    if (footageTask || musicAnalysisTask) reasons.push('Wait for analysis to finish before exporting.');
     if (!state.music) reasons.push('Import a music track first.');
     else if (!duration()) reasons.push('Waiting for the music duration to load.');
     if (!state.videos.length) reasons.push('Add at least one video source.');
@@ -220,7 +249,7 @@
   }
 
   function setMonitorRatio(ratio) {
-    const total = $('monitor').getBoundingClientRect().height + $('timelinePanel').getBoundingClientRect().height;
+    const total = $('monitor').getBoundingClientRect().height + activeTimelinePanel().getBoundingClientRect().height;
     if (total <= 360) return;
     const minRatio = 180 / total;
     const safeRatio = Math.min(1 - minRatio, Math.max(minRatio, ratio));
@@ -240,7 +269,7 @@
       document.body.classList.add('panel-resizing-horizontal');
       const startY = event.clientY;
       const startMonitorHeight = $('monitor').getBoundingClientRect().height;
-      const total = startMonitorHeight + $('timelinePanel').getBoundingClientRect().height;
+      const total = startMonitorHeight + activeTimelinePanel().getBoundingClientRect().height;
       const onMove = (moveEvent) => setMonitorRatio((startMonitorHeight + moveEvent.clientY - startY) / total);
       const onEnd = () => {
         separator.classList.remove('dragging');
@@ -324,13 +353,493 @@
   };
   const mediaUrl = (file) => makeUrl(file);
 
+  function sourceAnalysisMode() {
+    return (state.workspace === 'analysis' || state.workspace === 'color') && state.analysisTarget !== 'music' && Boolean(getVideo(state.analysisTarget));
+  }
+
+  function activeTimelinePanel() {
+    return $(sourceAnalysisMode() ? 'sourceAnalysisPanel' : 'timelinePanel');
+  }
+
+  function analysisMotionScale() {
+    return Math.max(0.005, footage.percentile(state.videos.filter((video) => video.analysis)
+      .flatMap((video) => video.analysis.motion.map((range) => range.score)), 0.9));
+  }
+
+  function getTimelineWindow(kind) {
+    const prefix = kind === 'music' ? 'music' : 'source';
+    const viewport = $(`${prefix}TimelineViewport`);
+    const span = 1 / timelineZoom[kind];
+    const width = (viewport.clientWidth - trackHeaderWidth) * timelineZoom[kind];
+    const start = width > 0 ? Math.max(0, Math.min(1 - span, viewport.scrollLeft / width)) : 0;
+    return { start, end: start + span };
+  }
+
+  function moveTimelineWindow(range, part, delta) {
+    const span = range.end - range.start;
+    if (part === 'start') return { start: Math.max(0, Math.min(range.end - 1 / maximumTimelineZoom, range.start + delta)), end: range.end };
+    if (part === 'end') return { start: range.start, end: Math.min(1, Math.max(range.start + 1 / maximumTimelineZoom, range.end + delta)) };
+    const start = Math.max(0, Math.min(1 - span, range.start + delta));
+    return { start, end: start + span };
+  }
+
+  function renderTimelineNavigator(kind) {
+    const prefix = kind === 'music' ? 'music' : 'source';
+    const navigator = $(`${prefix}TimelineNavigator`);
+    const range = getTimelineWindow(kind);
+    const span = range.end - range.start;
+    const total = kind === 'music' ? duration() : getVideo(state.analysisTarget)?.duration || 0;
+    const label = `${formatSourceTime(range.start * total, true)} to ${formatSourceTime(range.end * total, true)} · ${timelineZoom[kind].toFixed(2)}x`;
+    const thumb = navigator.querySelector('.navigator-window');
+    thumb.style.left = `${range.start * 100}%`;
+    thumb.style.width = `${span * 100}%`;
+    const pan = navigator.querySelector('.navigator-pan');
+    pan.setAttribute('aria-valuemin', '0');
+    pan.setAttribute('aria-valuemax', String((1 - span) * 100));
+    pan.setAttribute('aria-valuenow', String(range.start * 100));
+    pan.setAttribute('aria-valuetext', label);
+    navigator.querySelector('.navigator-rail').title = `${label}. Drag middle to pan; drag ends to zoom.`;
+    navigator.querySelector('.navigator-fit').disabled = timelineZoom[kind] === 1;
+    for (const part of ['start', 'end']) {
+      const handle = navigator.querySelector(`[data-navigator-edge="${part}"]`);
+      handle.setAttribute('aria-valuemin', String(part === 'start' ? 0 : (range.start + 1 / maximumTimelineZoom) * 100));
+      handle.setAttribute('aria-valuemax', String(part === 'end' ? 100 : (range.end - 1 / maximumTimelineZoom) * 100));
+      handle.setAttribute('aria-valuenow', String(range[part] * 100));
+      handle.setAttribute('aria-valuetext', formatSourceTime(range[part] * total, true));
+    }
+  }
+
+  function updateTimelineWidths() {
+    for (const [kind, prefix] of [['music', 'music'], ['footage', 'source']]) {
+      const viewport = $(`${prefix}TimelineViewport`);
+      if (viewport.clientWidth <= trackHeaderWidth) continue;
+      $(`${prefix}TimelineContent`).style.width = `${trackHeaderWidth + (viewport.clientWidth - trackHeaderWidth) * timelineZoom[kind]}px`;
+      renderTimelineNavigator(kind);
+    }
+  }
+
+  function setTimelineWindow(kind, start, end) {
+    const prefix = kind === 'music' ? 'music' : 'source';
+    const viewport = $(`${prefix}TimelineViewport`);
+    const span = Math.min(1, Math.max(1 / maximumTimelineZoom, end - start));
+    start = Math.max(0, Math.min(1 - span, start));
+    timelineZoom[kind] = 1 / span;
+    updateTimelineWidths();
+    viewport.scrollLeft = start * (viewport.clientWidth - trackHeaderWidth) * timelineZoom[kind];
+    if (kind === 'music') {
+      renderRuler();
+      drawWaveform();
+    } else {
+      const video = getVideo(state.analysisTarget);
+      renderTimeRuler($('sourceAnalysisRuler'), video?.duration || 0, formatSourceTime);
+    }
+    renderTimelineNavigator(kind);
+  }
+
+  function zoomTimeline(event, kind) {
+    if (!event.ctrlKey || !event.deltaY) return;
+    event.preventDefault();
+    const prefix = kind === 'music' ? 'music' : 'source';
+    const viewport = $(`${prefix}TimelineViewport`);
+    if (viewport.clientWidth <= trackHeaderWidth) return;
+    const previous = timelineZoom[kind];
+    const next = Math.min(maximumTimelineZoom, Math.max(1, previous * (event.deltaY < 0 ? 1.25 : 0.8)));
+    const anchor = Math.max(0, Math.min(viewport.clientWidth - trackHeaderWidth,
+      event.clientX - viewport.getBoundingClientRect().left - trackHeaderWidth));
+    const scrollLeft = (viewport.scrollLeft + anchor) * next / previous - anchor;
+    const start = scrollLeft / ((viewport.clientWidth - trackHeaderWidth) * next);
+    setTimelineWindow(kind, start, start + 1 / next);
+  }
+
+  function canEditAnalysis() {
+    if (footageTask || musicAnalysisTask || activeExport) {
+      showNotice('analysisEditNotice', 'Wait for analysis or export to finish before changing analysis.', 'warning');
+      return false;
+    }
+    return true;
+  }
+
+  function setWorkspace(workspace, save = true) {
+    endAudioScrub(false);
+    sourceDrag = null;
+    playheadDrag = null;
+    finishMusicAccentDrag(null, true);
+    musicPlayer.pause();
+    pausePreviewPlayers();
+    state.workspace = workspace;
+    state.activeCut = null;
+    document.querySelector('.app').dataset.workspace = workspace;
+    document.querySelectorAll('[data-workspace-only]').forEach((element) => {
+      element.hidden = element.dataset.workspaceOnly !== workspace;
+    });
+    document.querySelectorAll('[data-workspace-target]').forEach((button) => {
+      const selected = button.dataset.workspaceTarget === workspace;
+      button.setAttribute('aria-selected', String(selected));
+      button.tabIndex = selected ? 0 : -1;
+    });
+    $('layout').setAttribute('aria-labelledby', `${workspace}WorkspaceTab`);
+    $('workbenchTitle').textContent = workspace === 'analysis' ? 'Analysis' : workspace === 'color' ? 'Color' : 'Assembly';
+    $('workspaceHint').textContent = workspace === 'analysis' ? 'Review and correct analysis before editing.'
+      : workspace === 'color' ? 'Color correction for each source video.' : 'Assemble, preview and export your edit.';
+    const sourceTime = getVideo(state.analysisTarget) ? state.analysisTime : 0;
+    renderAnalysisEditor();
+    if (sourceAnalysisMode()) seekAnalysisSource(sourceTime);
+    else syncPreview(true);
+    updatePlayButton();
+    drawWaveform();
+    if (save) persistSession(true);
+  }
+
+  function setAnalysisTarget(target, time = 0) {
+    endAudioScrub(false);
+    sourceDrag = null;
+    playheadDrag = null;
+    if (target !== 'music' && !getVideo(target)) {
+      showNotice('analysisEditNotice', 'Select a source in the current project.', 'warning');
+      return;
+    }
+    finishMusicAccentDrag(null, true);
+    musicPlayer.pause();
+    pausePreviewPlayers();
+    state.analysisTarget = target;
+    state.analysisTime = time;
+    selectedRangeIndex = null;
+    showNotice('analysisEditNotice', '');
+    renderAnalysisEditor();
+    if (sourceAnalysisMode()) seekAnalysisSource(time);
+    else syncPreview(true);
+    drawWaveform();
+    updatePlayButton();
+    persistSession(true);
+  }
+
+  function renderAnalysisEditor() {
+    if (state.analysisTarget !== 'music' && !getVideo(state.analysisTarget)) state.analysisTarget = 'music';
+    if (state.workspace === 'color' && state.analysisTarget === 'music') {
+      state.analysisTarget = state.videos.find((video) => video.duration > 0)?.id || 'music';
+      state.analysisTime = 0;
+    }
+    $('analysisTarget').innerHTML = `<option value="music">${escapeHtml(state.music?.file.name || 'Music')}</option>`
+      + state.videos.map((video) => `<option value="${video.id}" ${video.duration ? '' : 'disabled'}>${escapeHtml(video.file.name)}</option>`).join('');
+    $('analysisTarget').value = state.analysisTarget;
+    const sourceMode = sourceAnalysisMode();
+    document.querySelector('.app').dataset.analysisTarget = sourceMode ? 'footage' : 'music';
+    $('timelinePanel').hidden = sourceMode || state.workspace === 'color';
+    $('sourceAnalysisPanel').hidden = !sourceMode;
+    updateTimelineWidths();
+    $('musicAnalysisSettings').hidden = state.workspace !== 'analysis' || sourceMode;
+    $('footageAnalysisSettings').hidden = state.workspace !== 'analysis' || !sourceMode;
+    $('footageRangeEditor').hidden = state.workspace !== 'analysis' || !sourceMode;
+    $('workbenchResizer').setAttribute('aria-controls', `monitor ${sourceMode ? 'sourceAnalysisPanel' : 'timelinePanel'}`);
+    $('timelineHelp').textContent = state.workspace === 'analysis'
+      ? 'Shift-click: add accent · Ctrl+wheel: zoom'
+      : 'Select marker to delete · Select clip · F: source segment · Ctrl+wheel: zoom';
+    $('waveEmpty').textContent = state.music ? 'Analyze music in the Analysis workspace to display a waveform.' : 'Import music to view waveform and suggested edit points';
+    $('monitorEmpty').querySelector('strong').textContent = state.workspace === 'analysis' && !sourceMode ? 'Music analysis' : 'Your first cut starts here.';
+    $('monitorEmpty').querySelector('p').textContent = state.workspace === 'analysis' && !sourceMode
+      ? 'Analyze the track, then add or remove cut accents on the waveform below.'
+      : 'Import a track and footage. AutoEdit assembles clips from every source automatically.';
+    if (state.workspace === 'color') {
+      $('monitorEmpty').querySelector('strong').textContent = 'Source color correction';
+      $('monitorEmpty').querySelector('p').textContent = 'Import footage and choose a source to adjust its color.';
+    }
+    $('sourceTimelineHelp').textContent = state.workspace === 'color' ? 'Drag to scrub · Ctrl+wheel to zoom' : 'Click ranges to edit; drag empty track to scrub';
+    renderMusicAccentEditor();
+    renderRangeEditor();
+    renderSourceAnalysisTracks();
+    renderColorEditor();
+  }
+
+  function renderColorEditor() {
+    const video = getVideo(state.analysisTarget);
+    $('colorTarget').innerHTML = state.videos.length ? state.videos.map((source) =>
+      `<option value="${source.id}" ${source.duration ? '' : 'disabled'}>${escapeHtml(source.file.name)}</option>`).join('')
+      : '<option value="">Import footage</option>';
+    $('colorTarget').value = video?.id || '';
+    const value = video?.color || colors.defaults;
+    for (const key of Object.keys(colors.controls)) {
+      $(`color-${key}`).value = String(value[key]);
+      $(`color-${key}-value`).value = String(value[key]);
+      $(`color-${key}`).disabled = Boolean(activeExport || !video?.duration);
+      $(`color-${key}-value`).disabled = Boolean(activeExport || !video?.duration);
+    }
+    $('resetSourceColor').disabled = Boolean(activeExport || !colors.adjusted(video?.color));
+  }
+
+  function changeSourceColor(key, value) {
+    const video = getVideo(state.analysisTarget);
+    if (activeExport || !video) {
+      showNotice('colorNotice', 'Select a source and wait for export to finish before changing color.', 'warning');
+      return;
+    }
+    const next = key ? { ...(video.color || colors.defaults), [key]: value } : null;
+    if (next && !colors.valid(next)) {
+      showNotice('colorNotice', 'Invalid source color settings.', 'warning');
+      return;
+    }
+    video.color = next;
+    colorPreviewError = null;
+    showNotice('colorNotice', '');
+    renderColorEditor();
+    drawPreviewFrame();
+    persistSession(!key);
+  }
+
+  function refreshMusicCuts() {
+    state.beatTimes = accents.effectiveCuts(state.detectedCutTimes, state.musicCutOverrides, duration() || Infinity);
+    if (selectedAccentTime !== null && !state.beatTimes.some((time) => accents.near(time, selectedAccentTime))) selectedAccentTime = null;
+    $('beatCount').textContent = `${state.beatTimes.length} cuts${state.tempoBpm ? ` · ${Math.round(state.tempoBpm)} BPM` : ''}`;
+    $('cutList').innerHTML = state.beatTimes.length ? state.beatTimes.slice(0, 12).map((time) => {
+      const manual = state.musicCutOverrides.added.some((added) => accents.near(time, added));
+      return `<li><button class="cut-accent-button ${selectedAccentTime !== null && accents.near(time, selectedAccentTime) ? 'selected' : ''}" data-music-accent="${time}"><span>${manual ? 'Manual' : 'Detected'} accent</span><span>${formatTime(time, true)}</span></button></li>`;
+    }).join('') : '<li class="cut-empty">No cut accents. Add an accent or analyze music to suggest cuts.</li>';
+    renderMusicAccentEditor();
+  }
+
+  function renderMusicAccentEditor() {
+    const blocked = Boolean(footageTask || musicAnalysisTask || activeExport);
+    $('addMusicAccent').disabled = blocked || !state.music || duration() <= 0.24;
+    $('removeMusicAccent').disabled = blocked || selectedAccentTime === null;
+    $('deleteMusicMarker').disabled = blocked || selectedAccentTime === null;
+    $('resetMusicAccents').disabled = blocked || !accents.hasEdits(state.musicCutOverrides);
+    const selectedTime = musicAccentDrag?.moved ? musicAccentDrag.time : selectedAccentTime;
+    $('selectedMusicAccent').textContent = selectedTime === null ? 'No accent selected' : `Selected: ${selectedTime.toFixed(3)} s`;
+    $('selectedMusicMarker').textContent = selectedTime === null ? 'No marker selected' : `Selected: ${selectedTime.toFixed(3)} s`;
+    const total = duration();
+    if (musicAccentDrag) {
+      for (const marker of $('accentMarkers').querySelectorAll('[data-music-accent]')) {
+        const time = Number(marker.dataset.musicAccent);
+        const selected = time === musicAccentDrag.from;
+        const shownTime = selected && musicAccentDrag.moved ? musicAccentDrag.time : time;
+        marker.disabled = blocked;
+        marker.classList.toggle('selected', selected);
+        marker.classList.toggle('dragging', selected && musicAccentDrag.moved);
+        marker.setAttribute('aria-pressed', String(selected));
+        marker.style.left = `${shownTime / total * 100}%`;
+        const label = marker.classList.contains('manual') ? 'Manual' : 'Detected';
+        marker.setAttribute('aria-label', `${label} accent at ${shownTime.toFixed(3)} seconds`);
+        marker.title = `${label} accent · ${shownTime.toFixed(3)} s · Drag to move`;
+      }
+      return;
+    }
+    $('accentMarkers').innerHTML = total ? state.beatTimes.map((time) => {
+      const manual = state.musicCutOverrides.added.some((added) => accents.near(time, added));
+      const selected = selectedAccentTime !== null && accents.near(time, selectedAccentTime);
+      return `<button class="accent-marker ${manual ? 'manual' : ''} ${selected ? 'selected' : ''}" data-music-accent="${time}" style="left:${time / total * 100}%" ${blocked ? 'disabled' : ''} aria-label="${manual ? 'Manual' : 'Detected'} accent at ${time.toFixed(3)} seconds" aria-pressed="${selected}" title="${manual ? 'Manual' : 'Detected'} accent · ${time.toFixed(3)} s · Drag to move"></button>`;
+    }).join('') : '';
+  }
+
+  function changeMusicAccent(action, time) {
+    if (!canEditAnalysis()) return;
+    try {
+      state.musicCutOverrides = accents.editAccent(state.musicCutOverrides, time, action, duration());
+      selectedAccentTime = action === 'add' ? Number(time.toFixed(3)) : null;
+      refreshMusicCuts();
+      drawWaveform();
+      rebuildAutomaticEdit();
+      persistSession(true);
+      showNotice('analysisEditNotice', `${action === 'add' ? 'Added' : 'Removed'} cut accent at ${time.toFixed(3)} seconds.`);
+    } catch (error) {
+      showNotice('analysisEditNotice', error.message, 'warning');
+    }
+  }
+
+  function removeSelectedMusicAccent() {
+    if (selectedAccentTime !== null) changeMusicAccent('remove', selectedAccentTime);
+  }
+
+  function selectMusicAccent(time) {
+    selectedAccentTime = time;
+    musicPlayer.currentTime = time;
+    syncPreview(true);
+    refreshMusicCuts();
+    persistSession();
+  }
+
+  function updateMusicAccentDrag(event) {
+    if (musicAccentDrag?.pointerId !== event.pointerId) return;
+    const drag = musicAccentDrag;
+    if (drag.cancelled) return;
+    drag.moved ||= Math.abs(event.clientX - drag.originX) >= 3;
+    if (!drag.moved) return;
+    const rect = waveWrap.getBoundingClientRect();
+    const lastTime = Math.floor((drag.duration - 0.121) * 1000) / 1000;
+    drag.time = Number(Math.max(0.121, Math.min(lastTime,
+      (event.clientX - rect.left - drag.grabOffset) / rect.width * drag.duration)).toFixed(3));
+    const marker = $('accentMarkers').querySelector(`[data-music-accent="${drag.from}"]`);
+    if (marker) {
+      marker.style.left = `${drag.time / drag.duration * 100}%`;
+      marker.classList.add('dragging');
+      marker.title = `Move accent · ${drag.time.toFixed(3)} s`;
+      marker.setAttribute('aria-label', `Accent at ${drag.time.toFixed(3)} seconds`);
+    }
+    $('selectedMusicAccent').textContent = `Selected: ${drag.time.toFixed(3)} s`;
+  }
+
+  function finishMusicAccentDrag(event, cancelled = false) {
+    if (!musicAccentDrag || (event && event.pointerId !== musicAccentDrag.pointerId)) return;
+    if (!cancelled && event) updateMusicAccentDrag(event);
+    const drag = musicAccentDrag;
+    musicAccentDrag = null;
+    if (waveWrap.hasPointerCapture(drag.pointerId)) waveWrap.releasePointerCapture(drag.pointerId);
+    if (event?.type === 'pointerup') {
+      suppressWaveClick = true;
+      setTimeout(() => { suppressWaveClick = false; }, 0);
+    }
+    if (cancelled || drag.cancelled) {
+      renderMusicAccentEditor();
+      return;
+    }
+    if (!drag.moved) {
+      selectMusicAccent(drag.from);
+      return;
+    }
+    if (drag.time === drag.from) {
+      renderMusicAccentEditor();
+      return;
+    }
+    if (!canEditAnalysis()) {
+      renderMusicAccentEditor();
+      return;
+    }
+    try {
+      state.musicCutOverrides = accents.moveAccent(state.musicCutOverrides, drag.from, drag.time, duration());
+      selectedAccentTime = drag.time;
+      refreshMusicCuts();
+      rebuildAutomaticEdit();
+      persistSession(true);
+      showNotice('analysisEditNotice', `Moved cut accent from ${drag.from.toFixed(3)} to ${drag.time.toFixed(3)} seconds.`);
+    } catch (error) {
+      renderMusicAccentEditor();
+      showNotice('analysisEditNotice', error.message, 'warning');
+    }
+  }
+
+  function currentFootageRanges() {
+    const video = getVideo(state.analysisTarget);
+    return video ? footage.editableRanges(video, rangeKind, analysisMotionScale()) : [];
+  }
+
+  function renderRangeEditor() {
+    const video = getVideo(state.analysisTarget);
+    const ranges = currentFootageRanges();
+    if (selectedRangeIndex !== null && !ranges[selectedRangeIndex]) selectedRangeIndex = null;
+    const selected = selectedRangeIndex === null ? null : ranges[selectedRangeIndex];
+    const blocked = Boolean(footageTask || musicAnalysisTask || activeExport || !video?.analysis);
+    $('footageRangeKind').value = rangeKind;
+    $('rangeEditStatus').textContent = video?.analysisEdits?.[rangeKind] ? 'Manual' : 'Detected';
+    $('footageRangeList').innerHTML = ranges.map((range, index) => `<li><button class="${index === selectedRangeIndex ? 'selected' : ''}" data-analysis-range="${index}" data-range-kind="${rangeKind}"><span>${formatSourceTime(range.start, true)}–${formatSourceTime(range.end, true)}</span><span>${Math.round(range.score * 100)}%</span></button></li>`).join('')
+      || '<li class="cut-empty">No ranges of this type. Analyze this source, or add a range after analysis.</li>';
+    $('newFootageRange').disabled = blocked;
+    $('removeFootageRange').disabled = blocked || selectedRangeIndex === null;
+    $('resetFootageRanges').disabled = blocked || !video?.analysisEdits?.[rangeKind];
+    for (const id of ['footageRangeStart', 'footageRangeEnd', 'motionRangeLevel', 'saveFootageRange']) $(id).disabled = blocked;
+    const lastTime = Math.floor((video?.duration || 0) * 1000) / 1000;
+    const start = selected?.start ?? Math.min(lastTime, state.analysisTime);
+    $('footageRangeStart').value = start.toFixed(3);
+    $('footageRangeEnd').value = Math.min(lastTime, selected?.end ?? start + 5).toFixed(3);
+    $('footageRangeStart').max = String(lastTime);
+    $('footageRangeEnd').max = String(lastTime);
+    $('motionRangeLevel').value = String(Math.round((selected?.score ?? 1) * 100));
+    $('motionRangeLevelValue').textContent = `${$('motionRangeLevel').value}%`;
+    $('motionRangeLevelField').hidden = rangeKind !== 'motion';
+  }
+
+  function renderSourceAnalysisTracks() {
+    const video = getVideo(state.analysisTarget);
+    if (!video) {
+      $('sourceAnalysisTracks').replaceChildren();
+      return;
+    }
+    $('sourceAnalysisName').textContent = video.file.name;
+    $('sourceAnalysisName').title = video.file.name;
+    $('sourceAnalysisDuration').textContent = formatSourceTime(video.duration);
+    $('sourceAnalysisStatus').textContent = video.analysis
+      ? video.analysis.audioStatus === 'none' ? 'No source audio track. Motion ranges remain editable.' : 'Speech and clapping ranges are approximate. Manual ranges are saved separately from detections.'
+      : 'Analyze this footage before editing its ranges.';
+    $('analysisSourceAudioToggle').disabled = video.analysis?.audioStatus === 'none';
+    renderTimeRuler($('sourceAnalysisRuler'), video.duration, formatSourceTime);
+    if (state.workspace === 'color') {
+      $('sourceAnalysisStatus').textContent = 'Source color corrections apply to every use of this video. Analysis continues to use the original footage.';
+      $('sourceAnalysisTracks').innerHTML = `<div class="source-analysis-track"><span class="source-analysis-track-label">Source</span><div class="source-analysis-lane" data-source-track="source">
+        <div class="color-source-range">${escapeHtml(video.file.name)}</div><div class="playhead" data-source-playhead></div></div></div>`;
+      updateAnalysisPlayhead();
+      return;
+    }
+    const colors = { speech: '#c9ef74', clapping: '#83b9d1', motion: '#ff806b' };
+    $('sourceAnalysisTracks').innerHTML = Object.entries(rangeKinds).map(([kind, label]) => {
+      const ranges = footage.editableRanges(video, kind, analysisMotionScale());
+      return `<div class="source-analysis-track"><span class="source-analysis-track-label">${label}</span><div class="source-analysis-lane" data-source-track="${kind}">
+        ${ranges.map((range, index) => `<button class="analysis-range ${rangeKind === kind && selectedRangeIndex === index ? 'selected' : ''}" data-analysis-range="${index}" data-range-kind="${kind}" style="left:${range.start / video.duration * 100}%;width:${(range.end - range.start) / video.duration * 100}%;--range-color:${colors[kind]}" title="${label} · ${range.start.toFixed(3)}–${range.end.toFixed(3)} s · ${Math.round(range.score * 100)}%">${label}</button>`).join('')}
+        <div class="playhead" data-source-playhead></div></div></div>`;
+    }).join('');
+    updateAnalysisPlayhead();
+  }
+
+  function selectFootageRange(kind, index) {
+    rangeKind = kind;
+    selectedRangeIndex = index;
+    renderRangeEditor();
+    renderSourceAnalysisTracks();
+    const range = currentFootageRanges()[index];
+    if (range) seekAnalysisSource(range.start);
+  }
+
+  function saveFootageRange(remove = false) {
+    if (!canEditAnalysis()) return;
+    const video = getVideo(state.analysisTarget);
+    if (!video?.analysis || (remove && selectedRangeIndex === null)) {
+      showNotice('analysisEditNotice', 'Analyze a source and select a range before editing it.', 'warning');
+      return;
+    }
+    try {
+      const replacement = remove ? null : {
+        start: Number($('footageRangeStart').value), end: Number($('footageRangeEnd').value),
+        score: rangeKind === 'motion' ? Number($('motionRangeLevel').value) / 100 : (currentFootageRanges()[selectedRangeIndex]?.score ?? 1)
+      };
+      const ranges = footage.editRanges(currentFootageRanges(), selectedRangeIndex, replacement, video.duration);
+      video.analysisEdits = { ...(video.analysisEdits || { version: 1 }), [rangeKind]: ranges };
+      selectedRangeIndex = replacement ? ranges.findIndex((range) => range.start === replacement.start && range.end === replacement.end) : null;
+      renderFootageAnalysis();
+      rebuildAutomaticEdit();
+      persistSession(true);
+      showNotice('analysisEditNotice', `${rangeKinds[rangeKind]} range ${remove ? 'removed' : 'saved'}. Detector results are unchanged.`);
+    } catch (error) {
+      showNotice('analysisEditNotice', error.message, 'warning');
+    }
+  }
+
+  function seekAnalysisSource(time) {
+    const video = getVideo(state.analysisTarget);
+    if (!video) return;
+    state.analysisTime = Math.max(0, Math.min(video.duration, time));
+    setPreviewSource(video, state.analysisTime);
+    updateAnalysisPlayhead();
+  }
+
+  function updateAnalysisPlayhead() {
+    if (!sourceAnalysisMode()) return;
+    const video = getVideo(state.analysisTarget);
+    if (previewPlayers.get(video.id) === activePreviewVideo && activePreviewVideo.readyState >= 1 && !activePreviewVideo.seeking) state.analysisTime = activePreviewVideo.currentTime;
+    $('timeDisplay').textContent = formatSourceTime(state.analysisTime, true);
+    $('monitorTime').textContent = `SOURCE ${formatSourceTime(state.analysisTime, true)}`;
+    document.querySelectorAll('[data-source-playhead]').forEach((playhead) => {
+      playhead.style.left = `${video.duration ? state.analysisTime / video.duration * 100 : 0}%`;
+    });
+  }
+
   function sessionSnapshot() {
     return {
       version: 1,
       music: state.music?.path ? { path: state.music.path, name: state.music.file.name, type: state.music.file.type } : null,
-      videos: state.videos.filter((video) => video.path).map((video) => ({ id: video.id, path: video.path, name: video.file.name, type: video.file.type, duration: video.duration, importance: video.importance })),
+      videos: state.videos.filter((video) => video.path).map((video) => ({ id: video.id, path: video.path, name: video.file.name, type: video.file.type, duration: video.duration, importance: video.importance, analysis: video.analysis || null, analysisEdits: video.analysisEdits || null, color: video.color || null })),
       edit: state.edit,
       beatTimes: state.beatTimes,
+      detectedCutTimes: state.detectedCutTimes,
+      musicCutOverrides: state.musicCutOverrides,
+      workspace: state.workspace,
+      analysisTarget: state.analysisTarget,
+      analysisTime: state.analysisTime,
       beatCandidates: state.beatCandidates,
       tempoBpm: state.tempoBpm,
       currentTime: musicPlayer.currentTime || 0,
@@ -339,6 +848,9 @@
       sensitivity: $('sensitivity').value,
       musicAudioEnabled: state.musicAudioEnabled,
       clipAudioEnabled: state.clipAudioEnabled,
+      musicVolume: state.musicVolume,
+      scrubAudioEnabled: state.scrubAudioEnabled,
+      useFootageAnalysis: state.useFootageAnalysis,
       previewResolution: state.previewResolution,
       audioAnalyzed: Boolean(state.audioBuffer)
     };
@@ -383,6 +895,9 @@
   }
 
   function clearCurrentProject() {
+    endAudioScrub(false);
+    audioScrubber.dispose();
+    finishMusicAccentDrag(null, true);
     musicPlayer.pause();
     for (const player of previewPlayers.values()) {
       player.pause();
@@ -392,14 +907,25 @@
     previewVideo.pause();
     activePreviewVideo = previewVideo;
     previewPlayers.clear();
+    previewSourceId = null;
+    colorPreviewError = null;
+    showNotice('colorNotice', '');
     for (const url of state.objectUrls) URL.revokeObjectURL(url);
     state.objectUrls.clear();
     state.music = null;
     state.audioBuffer = null;
+    state.musicEnergy = [];
     state.beatTimes = [];
+    state.detectedCutTimes = [];
+    state.musicCutOverrides = { added: [], removed: [] };
+    state.analysisTarget = 'music';
+    state.analysisTime = 0;
+    selectedAccentTime = null;
+    selectedRangeIndex = null;
     state.beatCandidates = [];
     state.tempoBpm = 0;
     state.videos = [];
+    clearSelectedClip();
     state.edit = [];
     state.activeCut = null;
     musicPlayer.removeAttribute('src');
@@ -421,6 +947,13 @@
     $('generateNotice').textContent = '';
     $('waveEmpty').classList.remove('hidden');
     $('analyzeButton').disabled = true;
+    state.musicVolume = 0.8;
+    state.scrubAudioEnabled = false;
+    state.useFootageAnalysis = true;
+    $('useFootageAnalysis').checked = true;
+    updateAudioToggles();
+    showNotice('footageNotice', '');
+    renderFootageAnalysis();
     $('minimumConsecutiveClips').value = '2';
     showNotice('assemblyNotice', '');
     setExportAvailability(false);
@@ -433,6 +966,10 @@
   }
 
   async function openProject() {
+    if (footageTask || musicAnalysisTask) {
+      showNotice('footageNotice', footageTask ? 'Cancel footage analysis before opening another project.' : 'Wait for music analysis before opening another project.', 'warning');
+      return;
+    }
     if (!desktopApi?.openProject) {
       const message = 'Open project files and restore saved sessions in the AutoEdit desktop app.';
       $('statusText').textContent = message;
@@ -487,6 +1024,10 @@
       $('previewResolution').value = state.previewResolution;
       state.musicAudioEnabled = session.musicAudioEnabled !== false;
       state.clipAudioEnabled = session.clipAudioEnabled !== false;
+      state.musicVolume = Number.isFinite(session.musicVolume) ? Math.min(1, Math.max(0, session.musicVolume)) : 0.8;
+      state.scrubAudioEnabled = session.scrubAudioEnabled === true;
+      state.useFootageAnalysis = session.useFootageAnalysis !== false;
+      $('useFootageAnalysis').checked = state.useFootageAnalysis;
       updateAudioToggles();
       state.videos = (session.videos || []).filter((video) => video.path && video.id).map((video) => ({
         id: video.id,
@@ -495,11 +1036,50 @@
         url: desktopApi.pathToFileURL(video.path),
         duration: Number(video.duration) || 0,
         importance: Number.isFinite(Number(video.importance)) ? Math.min(5, Math.max(0.1, Number(video.importance))) : 1,
+        color: colors.valid(video.color) ? video.color : null,
+        analysis: footage.validAnalysis(video.analysis) && video.analysis.duration === Number(video.duration) ? video.analysis : null,
+        analysisEdits: footage.validAnalysis(video.analysis) && video.analysis.duration === Number(video.duration)
+          && footage.validEdits(video.analysisEdits, Number(video.duration)) ? video.analysisEdits : null,
         thumb: ''
       }));
+      if ((session.videos || []).some((video) => video.color && !colors.valid(video.color))) {
+        showNotice('colorNotice', 'Invalid saved source color settings were discarded.', 'warning');
+      }
+      if ((session.videos || []).some((video) => video.analysis
+        && (!footage.validAnalysis(video.analysis) || video.analysis.duration !== Number(video.duration)))) {
+        showNotice('footageNotice', 'Invalid saved footage analysis was discarded. Analyze footage again.', 'warning');
+      }
+      if ((session.videos || []).some((video) => video.analysisEdits
+        && (!footage.validAnalysis(video.analysis) || video.analysis.duration !== Number(video.duration)
+          || !footage.validEdits(video.analysisEdits, Number(video.duration))))) {
+        showNotice('analysisEditNotice', 'Invalid saved footage range edits were discarded.', 'warning');
+      }
+      for (const video of state.videos.filter((video) => video.analysis)) {
+        try {
+          const fingerprint = await desktopApi.getFootageFingerprint(video.path);
+          if (!footage.sameFingerprint(video.analysis.fingerprint, fingerprint)) {
+            video.analysis = null;
+            video.analysisEdits = null;
+            showNotice('footageNotice', `${video.file.name} changed since analysis. Its range edits were discarded; analyze footage again.`);
+          }
+        } catch (error) {
+          video.analysis = null;
+          video.analysisEdits = null;
+          showNotice('footageNotice', `Could not validate analysis for ${video.file.name}: ${error.message}`, 'warning');
+        }
+      }
       const videoIds = new Set(state.videos.map((video) => video.id));
+      state.analysisTarget = videoIds.has(session.analysisTarget) ? session.analysisTarget : 'music';
+      state.analysisTime = Number.isFinite(session.analysisTime) ? Math.max(0, Math.min(getVideo(state.analysisTarget)?.duration || 0, session.analysisTime)) : 0;
+      clearSelectedClip();
       state.edit = (session.edit || []).filter((cut) => videoIds.has(cut.sourceId));
       state.beatTimes = Array.isArray(session.beatTimes) ? session.beatTimes : [];
+      state.detectedCutTimes = (Array.isArray(session.detectedCutTimes) ? session.detectedCutTimes : state.beatTimes)
+        .filter(Number.isFinite).sort((left, right) => left - right);
+      state.musicCutOverrides = accents.validOverrides(session.musicCutOverrides) ? session.musicCutOverrides : { added: [], removed: [] };
+      if (session.musicCutOverrides && !accents.validOverrides(session.musicCutOverrides)) {
+        showNotice('analysisEditNotice', 'Invalid saved music accent edits were discarded.', 'warning');
+      }
       state.beatCandidates = Array.isArray(session.beatCandidates) ? session.beatCandidates : [];
       state.tempoBpm = Number(session.tempoBpm) || 0;
 
@@ -514,7 +1094,7 @@
           showNotice('analysisNotice', `Could not reopen the music file: ${error.message}`);
         }
         state.music = { file, path: session.music.path, url };
-        $('musicList').innerHTML = `<div class="asset selected music-asset" title="Double-click to fine-tune music analysis"><div class="asset-thumb">♫</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div><div class="asset-meta">Double-click to fine-tune analysis</div></div><span class="asset-action">♪</span></div>`;
+        $('musicList').innerHTML = `<div class="asset selected music-asset" title="Double-click to open the Analysis workspace"><div class="asset-thumb">♫</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div><div class="asset-meta">Double-click to edit analysis</div></div><span class="asset-action">♪</span></div>`;
         $('trackName').textContent = file.name.toUpperCase();
         $('analyzeButton').disabled = false;
         musicPlayer.addEventListener('loadedmetadata', () => {
@@ -527,12 +1107,9 @@
       renderVideos();
       renderSceneWeights();
       setExportAvailability(state.edit.length > 0);
+      refreshMusicCuts();
       if (state.tempoBpm) {
         $('analysisLabel').textContent = `~${Math.round(state.tempoBpm)} BPM`;
-        $('beatCount').textContent = `${state.beatTimes.length} cuts · ${Math.round(state.tempoBpm)} BPM`;
-        $('cutList').innerHTML = state.beatTimes.length
-          ? state.beatTimes.slice(0, 12).map((time, index) => `<li class="cut-row"><span>Cut ${String(index + 1).padStart(2, '0')}</span><span>${formatTime(time, true)}</span></li>`).join('')
-          : '<li class="cut-empty">No saved cut points.</li>';
         showNotice('analysisNotice', `Restored beat grid at ~${Math.round(state.tempoBpm)} BPM.`);
       }
       updateDuration();
@@ -540,6 +1117,7 @@
 
       if (state.music && session.audioAnalyzed) {
         state.audioBuffer = await decodeMusicBuffer();
+        state.musicEnergy = footage.musicEnergy(state.audioBuffer);
         $('waveEmpty').classList.add('hidden');
         updateDuration();
         drawWaveform();
@@ -547,6 +1125,8 @@
         rebuildAutomaticEdit();
       }
       $('statusText').textContent = projectSession ? 'Project opened' : 'Last session restored';
+      setWorkspace(['analysis', 'editing', 'color'].includes(session.workspace) ? session.workspace : 'editing', false);
+      persistSession(true);
     } catch (error) {
       showNotice('analysisNotice', `Could not restore the last session: ${error.message}`);
     }
@@ -556,22 +1136,10 @@
   $('addVideos').addEventListener('click', () => videoInput.click());
   $('openProjectButton').addEventListener('click', openProject);
   $('saveProjectButton').addEventListener('click', saveProject);
-  $('musicList').addEventListener('dblclick', async () => {
+  $('musicList').addEventListener('dblclick', () => {
     if (!state.music) return;
-    if (!desktopApi?.openAnalysisWindow || !state.music.path) {
-      showNotice('analysisNotice', 'Fine-tune analysis in the AutoEdit desktop app.');
-      return;
-    }
-    try {
-      await desktopApi.openAnalysisWindow({
-        filePath: state.music.path,
-        name: state.music.file.name,
-        sensitivity: Number($('sensitivity').value),
-        cadence: $('cutCadence').value
-      });
-    } catch (error) {
-      showNotice('analysisNotice', `Could not open the analysis window: ${error.message}`);
-    }
+    setWorkspace('analysis');
+    setAnalysisTarget('music');
   });
   desktopApi?.onAnalysisSettings?.(({ sensitivity, cadence }) => {
     $('sensitivity').value = String(sensitivity);
@@ -604,6 +1172,138 @@
     rebuildAutomaticEdit();
     persistSession();
   });
+  $('musicVolume').addEventListener('input', () => {
+    state.musicVolume = Number($('musicVolume').value) / 100;
+    updateAudioToggles();
+    persistSession();
+  });
+  $('useFootageAnalysis').addEventListener('change', () => {
+    state.useFootageAnalysis = $('useFootageAnalysis').checked;
+    rebuildAutomaticEdit();
+    persistSession(true);
+  });
+  $('analyzeFootageButton').addEventListener('click', analyzeFootage);
+  $('cancelFootageButton').addEventListener('click', async () => {
+    if (!footageTask) return;
+    footageTask.cancelled = true;
+    $('cancelFootageButton').disabled = true;
+    showNotice('footageNotice', 'Canceling footage analysis…');
+    try { await desktopApi.cancelFootageAnalysis(); } catch (error) {
+      showNotice('footageNotice', `Could not cancel footage analysis: ${error.message}`, 'warning');
+    }
+  });
+  document.querySelectorAll('[data-workspace-target]').forEach((button) => {
+    button.addEventListener('click', () => setWorkspace(button.dataset.workspaceTarget));
+    button.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+      event.preventDefault();
+      const tabs = [...document.querySelectorAll('[data-workspace-target]')];
+      const index = tabs.indexOf(button);
+      const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+        : (index + (event.key === 'ArrowLeft' ? -1 : 1) + tabs.length) % tabs.length;
+      const target = tabs[next].dataset.workspaceTarget;
+      setWorkspace(target);
+      $(`${target}WorkspaceTab`).focus();
+    });
+  });
+  $('analysisTarget').addEventListener('change', () => setAnalysisTarget($('analysisTarget').value));
+  $('colorTarget').addEventListener('change', () => setAnalysisTarget($('colorTarget').value));
+  $('colorControls').innerHTML = Object.entries(colors.controls).map(([key, control]) => `<div class="field">
+    <label for="color-${key}">${control.label}</label>
+    <div class="color-control-row">
+      <input id="color-${key}" type="range" min="${control.min}" max="${control.max}" step="${control.step}" value="${control.value}" disabled>
+      <input id="color-${key}-value" type="number" aria-label="${control.label} value" min="${control.min}" max="${control.max}" step="${control.step}" value="${control.value}" required disabled>
+    </div>
+  </div>`).join('');
+  for (const key of Object.keys(colors.controls)) {
+    $(`color-${key}`).addEventListener('input', () => changeSourceColor(key, Number($(`color-${key}`).value)));
+    $(`color-${key}-value`).addEventListener('change', () => {
+      const input = $(`color-${key}-value`);
+      if (!input.checkValidity()) {
+        showNotice('colorNotice', `Enter a valid ${colors.controls[key].label.toLowerCase()} value.`, 'warning');
+        input.reportValidity();
+        return;
+      }
+      changeSourceColor(key, Number(input.value));
+    });
+  }
+  $('resetSourceColor').addEventListener('click', () => changeSourceColor(null));
+  $('addMusicAccent').addEventListener('click', () => changeMusicAccent('add', musicPlayer.currentTime || 0));
+  $('removeMusicAccent').addEventListener('click', () => {
+    removeSelectedMusicAccent();
+  });
+  $('deleteMusicMarker').addEventListener('click', removeSelectedMusicAccent);
+  $('resetMusicAccents').addEventListener('click', () => {
+    if (!canEditAnalysis() || !window.confirm('Reset all manual music accent additions and removals?')) return;
+    state.musicCutOverrides = { added: [], removed: [] };
+    selectedAccentTime = null;
+    refreshMusicCuts();
+    drawWaveform();
+    rebuildAutomaticEdit();
+    persistSession(true);
+    showNotice('analysisEditNotice', 'Restored detected cut accents.');
+  });
+  $('cutList').addEventListener('click', (event) => {
+    const button = event.target.closest('[data-music-accent]');
+    if (button) selectMusicAccent(Number(button.dataset.musicAccent));
+  });
+  $('footageRangeKind').addEventListener('change', () => {
+    rangeKind = $('footageRangeKind').value;
+    selectedRangeIndex = null;
+    renderRangeEditor();
+    renderSourceAnalysisTracks();
+  });
+  const selectRangeFromEvent = (event) => {
+    const button = event.target.closest('[data-analysis-range]');
+    if (button) selectFootageRange(button.dataset.rangeKind, Number(button.dataset.analysisRange));
+  };
+  $('footageRangeList').addEventListener('click', selectRangeFromEvent);
+  $('sourceAnalysisTracks').addEventListener('click', selectRangeFromEvent);
+  $('newFootageRange').addEventListener('click', () => {
+    selectedRangeIndex = null;
+    renderRangeEditor();
+    renderSourceAnalysisTracks();
+    $('footageRangeStart').focus();
+  });
+  $('footageRangeForm').addEventListener('submit', (event) => { event.preventDefault(); saveFootageRange(); });
+  $('removeFootageRange').addEventListener('click', () => saveFootageRange(true));
+  $('motionRangeLevel').addEventListener('input', () => { $('motionRangeLevelValue').textContent = `${$('motionRangeLevel').value}%`; });
+  $('resetFootageRanges').addEventListener('click', () => {
+    if (!canEditAnalysis() || !window.confirm(`Reset manual ${rangeKinds[rangeKind].toLowerCase()} ranges to detector results?`)) return;
+    const video = getVideo(state.analysisTarget);
+    if (!video?.analysisEdits) return;
+    const edits = { ...video.analysisEdits };
+    delete edits[rangeKind];
+    video.analysisEdits = Object.keys(edits).length > 1 ? edits : null;
+    selectedRangeIndex = null;
+    renderFootageAnalysis();
+    rebuildAutomaticEdit();
+    persistSession(true);
+    showNotice('analysisEditNotice', `Restored detected ${rangeKinds[rangeKind].toLowerCase()} ranges.`);
+  });
+  $('sourceAnalysisTracks').addEventListener('pointerdown', (event) => {
+    const track = event.target.closest('[data-source-track]');
+    if (event.button !== 0 || activeExport || !track || event.target.closest('[data-analysis-range]')) return;
+    event.preventDefault();
+    sourceDrag = { pointerId: event.pointerId, track };
+    beginAudioScrub();
+    $('sourceAnalysisTracks').setPointerCapture(event.pointerId);
+    const rect = track.getBoundingClientRect();
+    seekAnalysisSource((event.clientX - rect.left) / rect.width * getVideo(state.analysisTarget).duration);
+    previewScrubAudio();
+  });
+  $('sourceAnalysisTracks').addEventListener('pointermove', (event) => {
+    if (sourceDrag?.pointerId !== event.pointerId) return;
+    const rect = sourceDrag.track.getBoundingClientRect();
+    seekAnalysisSource((event.clientX - rect.left) / rect.width * getVideo(state.analysisTarget).duration);
+    previewScrubAudio();
+  });
+  for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) $('sourceAnalysisTracks').addEventListener(name, () => {
+    if (!sourceDrag) return;
+    sourceDrag = null;
+    endAudioScrub();
+    persistSession();
+  });
   monitorElement.addEventListener('contextmenu', (event) => {
     event.preventDefault();
     previewContextMenu.classList.remove('hidden');
@@ -624,12 +1324,22 @@
   });
   $('analyzeButton').addEventListener('click', analyzeMusic);
   $('playButton').addEventListener('click', togglePlayback);
+  $('scrubAudioToggle').addEventListener('click', () => {
+    state.scrubAudioEnabled = !state.scrubAudioEnabled;
+    updateAudioToggles();
+    persistSession(true);
+  });
   $('musicAudioToggle').addEventListener('click', () => {
     state.musicAudioEnabled = !state.musicAudioEnabled;
     updateAudioToggles();
     persistSession(true);
   });
   $('clipAudioToggle').addEventListener('click', () => {
+    state.clipAudioEnabled = !state.clipAudioEnabled;
+    updateAudioToggles();
+    persistSession(true);
+  });
+  $('analysisSourceAudioToggle').addEventListener('click', () => {
     state.clipAudioEnabled = !state.clipAudioEnabled;
     updateAudioToggles();
     persistSession(true);
@@ -647,26 +1357,167 @@
     if (activeExport.recorder && activeExport.recorder.state !== 'inactive') activeExport.recorder.stop();
   });
   const waveWrap = $('waveWrap');
+  waveWrap.addEventListener('pointerdown', (event) => {
+    const marker = event.target.closest('.accent-marker');
+    if (event.button !== 0 || !marker || marker.disabled || state.workspace !== 'analysis') return;
+    if (!canEditAnalysis()) return;
+    event.preventDefault();
+    musicPlayer.pause();
+    const from = Number(marker.dataset.musicAccent);
+    const rect = waveWrap.getBoundingClientRect();
+    selectedAccentTime = from;
+    musicAccentDrag = { pointerId: event.pointerId, from, time: from, duration: duration(), originX: event.clientX,
+      grabOffset: event.clientX - rect.left - from / duration() * rect.width, moved: false };
+    waveWrap.setPointerCapture(event.pointerId);
+    renderMusicAccentEditor();
+  });
+  waveWrap.addEventListener('pointermove', updateMusicAccentDrag);
+  waveWrap.addEventListener('pointerup', (event) => finishMusicAccentDrag(event));
+  for (const name of ['pointercancel', 'lostpointercapture']) waveWrap.addEventListener(name, (event) => finishMusicAccentDrag(event, true));
+  $('timelinePanel').addEventListener('wheel', (event) => zoomTimeline(event, 'music'), { passive: false });
+  $('sourceAnalysisPanel').addEventListener('wheel', (event) => zoomTimeline(event, 'footage'), { passive: false });
+  $('musicTimelineViewport').addEventListener('scroll', drawWaveform);
+  $('sourceTimelineViewport').addEventListener('scroll', () => renderTimelineNavigator('footage'));
+  for (const navigator of document.querySelectorAll('.timeline-navigator')) {
+    const kind = navigator.dataset.timelineKind;
+    navigator.querySelector('.navigator-fit').addEventListener('click', () => setTimelineWindow(kind, 0, 1));
+    navigator.addEventListener('pointerdown', (event) => {
+      if (event.button !== 0 || !event.target.closest('.navigator-rail')) return;
+      event.preventDefault();
+      const rail = navigator.querySelector('.navigator-rail').getBoundingClientRect();
+      const range = getTimelineWindow(kind);
+      const thumb = event.target.closest('.navigator-window');
+      if (!thumb) {
+        const start = (event.clientX - rail.left) / rail.width - (range.end - range.start) / 2;
+        setTimelineWindow(kind, start, start + range.end - range.start);
+        return;
+      }
+      const handle = event.target.closest('[data-navigator-edge]');
+      (handle || thumb.querySelector('.navigator-pan')).focus({ preventScroll: true });
+      navigatorDrag = { kind, part: handle?.dataset.navigatorEdge || 'pan', pointerId: event.pointerId, origin: event.clientX, width: rail.width, range };
+      navigator.setPointerCapture(event.pointerId);
+    });
+    navigator.addEventListener('pointermove', (event) => {
+      if (navigatorDrag?.pointerId !== event.pointerId || navigatorDrag.kind !== kind) return;
+      const range = moveTimelineWindow(navigatorDrag.range, navigatorDrag.part, (event.clientX - navigatorDrag.origin) / navigatorDrag.width);
+      setTimelineWindow(kind, range.start, range.end);
+    });
+    for (const name of ['pointerup', 'pointercancel', 'lostpointercapture']) navigator.addEventListener(name, (event) => {
+      if (navigatorDrag?.kind === kind && navigatorDrag.pointerId === event.pointerId) navigatorDrag = null;
+    });
+    navigator.addEventListener('keydown', (event) => {
+      if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || !event.target.closest('.navigator-window')) return;
+      event.preventDefault();
+      const part = event.target.closest('[data-navigator-edge]')?.dataset.navigatorEdge || 'pan';
+      const range = getTimelineWindow(kind);
+      let delta = (range.end - range.start) * 0.1 * (event.shiftKey ? 10 : 1) * (event.key === 'ArrowLeft' ? -1 : 1);
+      if (event.key === 'Home') delta = part === 'end' ? range.start + 1 / maximumTimelineZoom - range.end : -range.start;
+      if (event.key === 'End') delta = part === 'start' ? range.end - 1 / maximumTimelineZoom - range.start : 1 - range.end;
+      const next = moveTimelineWindow(range, part, delta);
+      setTimelineWindow(kind, next.start, next.end);
+    });
+  }
   waveWrap.addEventListener('click', (event) => {
     if (suppressWaveClick) {
       suppressWaveClick = false;
       return;
     }
+    const marker = event.target.closest('[data-music-accent]');
+    if (marker && ['analysis', 'editing'].includes(state.workspace)) {
+      selectMusicAccent(Number(marker.dataset.musicAccent));
+      return;
+    }
     seekFromWaveform(event);
+    if (state.workspace === 'analysis' && event.shiftKey) changeMusicAccent('add', musicPlayer.currentTime);
   });
   attachPlayheadDrag(waveWrap);
-  attachPlayheadDrag($('videoTrack'));
+  attachPlayheadDrag($('musicTimelineContent'));
   $('videoTrack').addEventListener('click', (event) => {
     const clipElement = event.target.closest('[data-cut-index]');
     if (!clipElement) return;
-    const cut = state.edit[Number(clipElement.dataset.cutIndex)];
+    selectedCutIndex = Number(clipElement.dataset.cutIndex);
+    const cut = state.edit[selectedCutIndex];
     if (!cut) return;
+    $('videoTrack').querySelectorAll('[data-cut-index]').forEach((clip) => {
+      const selected = Number(clip.dataset.cutIndex) === selectedCutIndex;
+      clip.classList.toggle('selected', selected);
+      clip.setAttribute('aria-pressed', String(selected));
+    });
     musicPlayer.currentTime = cut.start;
     syncPreview(true);
   });
+  clipSlipTrack.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || clipSlipOverlay.classList.contains('hidden')) return;
+    const rect = clipSlipTrack.getBoundingClientRect();
+    const selection = clipSlipWindow.getBoundingClientRect();
+    const grabbedWindow = event.target.closest('#clipSlipWindow');
+    const offset = grabbedWindow ? event.clientX - selection.left : selection.width / 2;
+    sourceSlipDrag = { pointerId: event.pointerId, offset };
+    clipSlipTrack.classList.add('dragging');
+    clipSlipTrack.setPointerCapture(event.pointerId);
+    clipSlipPreview.pause();
+    updateClipSlipFromPointer(event.clientX, rect);
+    event.preventDefault();
+  });
+  clipSlipTrack.addEventListener('pointermove', (event) => {
+    if (sourceSlipDrag?.pointerId !== event.pointerId) return;
+    updateClipSlipFromPointer(event.clientX, clipSlipTrack.getBoundingClientRect());
+  });
+  clipSlipTrack.addEventListener('pointerup', (event) => {
+    if (sourceSlipDrag?.pointerId !== event.pointerId) return;
+    sourceSlipDrag = null;
+    clipSlipTrack.classList.remove('dragging');
+    persistSession();
+  });
+  for (const name of ['pointercancel', 'lostpointercapture']) clipSlipTrack.addEventListener(name, (event) => {
+    if (sourceSlipDrag?.pointerId !== event.pointerId) return;
+    sourceSlipDrag = null;
+    clipSlipTrack.classList.remove('dragging');
+    persistSession();
+  });
+  clipSlipTrack.addEventListener('keydown', handleClipSlipTrackKeydown);
+  $('clipSlipSetStart').addEventListener('click', () => setClipSlipPoint('start'));
+  $('clipSlipSetEnd').addEventListener('click', () => setClipSlipPoint('end'));
+  clipSlipPreview.addEventListener('timeupdate', updateClipSlipPlayerTime);
+  clipSlipPreview.addEventListener('seeked', updateClipSlipPlayerTime);
+  $('closeClipSlip').addEventListener('click', closeClipSlipEditor);
+  $('doneClipSlip').addEventListener('click', closeClipSlipEditor);
+  clipSlipOverlay.addEventListener('click', (event) => {
+    if (event.target === clipSlipOverlay) closeClipSlipEditor();
+  });
+  clipSlipPreview.addEventListener('error', () => {
+    if (!clipSlipOverlay.classList.contains('hidden')) {
+      showNotice('generateNotice', `Could not preview the source video: ${getExportMediaError(clipSlipPreview).message}`, 'warning');
+    }
+  });
   window.addEventListener('resize', drawWaveform);
   window.addEventListener('resize', closePreviewContextMenu);
+  window.addEventListener('keydown', handlePlaybackShortcut);
+  window.addEventListener('keydown', handleClipSlipShortcut);
+  function handleWorkspaceDeleteShortcut(event) {
+    if (event.key !== 'Delete' || !['analysis', 'editing'].includes(state.workspace)
+      || event.target.closest('input, select, textarea, [contenteditable="true"]')) return;
+    if (sourceAnalysisMode() && selectedRangeIndex !== null) {
+      event.preventDefault();
+      saveFootageRange(true);
+    } else if (!sourceAnalysisMode() && selectedAccentTime !== null) {
+      event.preventDefault();
+      removeSelectedMusicAccent();
+    }
+  }
   window.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape' && musicAccentDrag) {
+      event.preventDefault();
+      musicAccentDrag.cancelled = true;
+      musicAccentDrag.moved = false;
+      musicAccentDrag.time = musicAccentDrag.from;
+      renderMusicAccentEditor();
+      return;
+    }
+    if (event.key === 'Delete') {
+      handleWorkspaceDeleteShortcut(event);
+      return;
+    }
     if (event.key === 'Escape' && !previewContextMenu.classList.contains('hidden')) {
       closePreviewContextMenu();
       return;
@@ -683,11 +1534,12 @@
     }
   });
   musicPlayer.addEventListener('timeupdate', syncPreview);
-  musicPlayer.addEventListener('play', () => { state.playing = true; updatePlayButton(); startFrameMonitoring(); });
-  musicPlayer.addEventListener('pause', () => { state.playing = false; pausePreviewPlayers(); stopFrameMonitoring(); updatePlayButton(); persistSession(); });
-  musicPlayer.addEventListener('ended', () => { state.playing = false; pausePreviewPlayers(); stopFrameMonitoring(); updatePlayButton(); });
+  musicPlayer.addEventListener('play', () => { state.playing = true; updatePlayButton(); startFrameMonitoring(); startPlayheadAnimation(); });
+  musicPlayer.addEventListener('pause', () => { state.playing = false; pausePreviewPlayers(); stopFrameMonitoring(); stopPlayheadAnimation(); updatePlayButton(); persistSession(); });
+  musicPlayer.addEventListener('ended', () => { state.playing = false; pausePreviewPlayers(); stopFrameMonitoring(); stopPlayheadAnimation(); updatePlayButton(); });
   musicPlayer.addEventListener('loadedmetadata', () => {
     updateDuration();
+    refreshMusicCuts();
     rebuildAutomaticEdit();
   });
   musicPlayer.addEventListener('error', () => {
@@ -709,6 +1561,14 @@
     if (state.edit.length) showNotice('generateNotice', 'A source clip could not be decoded. Check its file path and codec.');
   });
   previewVideo.addEventListener('playing', () => { if (activePreviewVideo === previewVideo) sampleDroppedFrames(); });
+  for (const name of ['timeupdate', 'seeked', 'playing', 'pause', 'ended']) previewVideo.addEventListener(name, () => {
+    if (activePreviewVideo !== previewVideo || !sourceAnalysisMode()) return;
+    updateAnalysisPlayhead();
+    updatePlayButton();
+    if (name === 'playing') startPlayheadAnimation();
+    if (name === 'pause' || name === 'ended') stopPlayheadAnimation();
+    if (name === 'pause' || name === 'ended') persistSession();
+  });
 
   const dropZone = $('dropZone');
   for (const eventName of ['dragenter', 'dragover']) dropZone.addEventListener(eventName, (event) => { event.preventDefault(); dropZone.classList.add('dragging'); });
@@ -721,18 +1581,31 @@
   });
 
   function loadMusic(file) {
+    if (footageTask || musicAnalysisTask) {
+      showNotice('footageNotice', footageTask ? 'Cancel footage analysis before replacing the music.' : 'Wait for music analysis before replacing the music.', 'warning');
+      return;
+    }
+    finishMusicAccentDrag(null, true);
+    endAudioScrub(false);
+    audioScrubber.dispose();
     if (state.music?.url?.startsWith('blob:')) URL.revokeObjectURL(state.music.url);
     const filePath = getMediaPath(file);
     state.music = { file, path: filePath, url: mediaUrl(file, filePath) };
     state.audioBuffer = null;
+    state.musicEnergy = [];
     state.beatTimes = [];
+    state.detectedCutTimes = [];
+    state.musicCutOverrides = { added: [], removed: [] };
+    selectedAccentTime = null;
+    state.analysisTarget = 'music';
     state.beatCandidates = [];
     state.tempoBpm = 0;
+    clearSelectedClip();
     state.edit = [];
     renderVideoTrack();
     musicPlayer.pause();
     musicPlayer.src = state.music.url;
-    $('musicList').innerHTML = `<div class="asset selected music-asset" title="Double-click to fine-tune music analysis"><div class="asset-thumb">♫</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div><div class="asset-meta">Double-click to fine-tune analysis</div></div><span class="asset-action">♪</span></div>`;
+    $('musicList').innerHTML = `<div class="asset selected music-asset" title="Double-click to open the Analysis workspace"><div class="asset-thumb">♫</div><div class="asset-copy"><div class="asset-name" title="${escapeHtml(file.name)}">${escapeHtml(file.name)}</div><div class="asset-meta">Double-click to edit analysis</div></div><span class="asset-action">♪</span></div>`;
     $('trackName').textContent = file.name.toUpperCase();
     $('analyzeButton').disabled = false;
     setExportAvailability(false);
@@ -749,10 +1622,15 @@
     $('monitorSource').textContent = 'No source selected';
     updateDuration();
     drawWaveform();
+    renderAnalysisEditor();
     persistSession(true);
   }
 
   async function addVideos(files) {
+    if (footageTask) {
+      showNotice('footageNotice', 'Cancel footage analysis before adding footage.', 'warning');
+      return;
+    }
     for (const file of files) {
       if (!file.type.startsWith('video/')) continue;
       const filePath = getMediaPath(file);
@@ -791,6 +1669,7 @@
   }
 
   function renderVideos() {
+    renderFootageAnalysis();
     $('videoCount').textContent = `${state.videos.length} ${state.videos.length === 1 ? 'source' : 'sources'}`;
     if (!state.videos.length) {
       $('videoList').innerHTML = '<div class="empty-note">Add camera angles or other footage sources.</div>';
@@ -801,6 +1680,10 @@
       if (event.target.closest('[data-remove-video]')) return;
       const video = getVideo(row.dataset.videoId);
       if (!video) return;
+      if (state.workspace === 'analysis' || state.workspace === 'color') {
+        setAnalysisTarget(video.id);
+        return;
+      }
       setPreviewSource(video, 0);
       musicPlayer.pause();
       renderVideos();
@@ -869,9 +1752,119 @@
     }).join('');
   }
 
+  function renderFootageAnalysis() {
+    const analyzed = state.videos.filter((video) => video.analysis);
+    $('footageAnalysisLabel').textContent = footageTask ? 'Analyzing' : `${analyzed.length}/${state.videos.length} analyzed`;
+    $('analyzeFootageButton').disabled = Boolean(footageTask || musicAnalysisTask || activeExport) || !state.videos.some((video) => video.duration > 0);
+    renderAnalysisEditor();
+    setExportAvailability(state.edit.length > 0);
+  }
+
+  async function analyzeFootage() {
+    if (footageTask) return;
+    if (musicAnalysisTask) {
+      showNotice('footageNotice', 'Wait for music analysis to finish before analyzing footage.', 'warning');
+      return;
+    }
+    if (activeExport) {
+      showNotice('footageNotice', 'Wait for video export to finish before analyzing footage.', 'warning');
+      return;
+    }
+    if (!desktopApi?.analyzeFootage) {
+      showNotice('footageNotice', 'Local footage analysis is available in the AutoEdit desktop app.', 'warning');
+      return;
+    }
+    const videos = state.videos.filter((video) => video.duration > 0);
+    if (!videos.length || videos.some((video) => !video.path)) {
+      showNotice('footageNotice', 'Import local video files and wait for their durations to load.', 'warning');
+      return;
+    }
+    if (!state.videos.some((video) => video.analysis?.audioStatus === 'available')
+      && !window.confirm('Analyze footage locally? First use downloads an audio-event model from Hugging Face (about 91 MB). Videos and audio are never uploaded. Long recordings can take considerable time.')) return;
+    const task = { cancelled: false };
+    footageTask = task;
+    musicPlayer.pause();
+    $('cancelFootageButton').classList.remove('hidden');
+    $('cancelFootageButton').disabled = false;
+    $('footageProgress').classList.remove('hidden');
+    $('footageProgress').value = 0;
+    renderFootageAnalysis();
+    let completed = 0;
+    const unsubscribe = desktopApi.onFootageProgress(({ message, fraction }) => {
+      $('footageProgress').value = (completed + Math.max(0, Math.min(1, fraction))) / videos.length;
+      showNotice('footageNotice', `${videos[completed]?.file.name || 'Footage'}: ${message}`);
+    });
+    let currentVideo = null;
+    try {
+      persistSession(true);
+      if (state.music && !state.audioBuffer) {
+        showNotice('footageNotice', 'Analyzing music energy and edit points…');
+        const buffer = await decodeMusicBuffer();
+        if (task.cancelled) throw new Error('Footage analysis canceled.');
+        state.audioBuffer = buffer;
+        state.musicEnergy = footage.musicEnergy(buffer);
+        $('waveEmpty').classList.add('hidden');
+        updateDuration();
+        updateBeatAnalysis();
+      }
+      for (const video of videos) {
+        if (task.cancelled) throw new Error('Footage analysis canceled.');
+        currentVideo = video;
+        const analysis = await desktopApi.analyzeFootage({
+          filePath: video.path, duration: video.duration, cached: video.analysis || null
+        });
+        if (task.cancelled) throw new Error('Footage analysis canceled.');
+        if (!footage.validAnalysis(analysis)) throw new Error(`${video.file.name} returned invalid analysis.`);
+        if (video.analysisEdits && !footage.sameFingerprint(video.analysis?.fingerprint, analysis.fingerprint)) {
+          video.analysisEdits = null;
+          showNotice('analysisEditNotice', `${video.file.name} changed. Its manual range edits were discarded.`);
+        }
+        video.analysis = analysis;
+        completed++;
+        currentVideo = null;
+        renderFootageAnalysis();
+        persistSession(true);
+      }
+      rebuildAutomaticEdit();
+      showNotice('footageNotice', `Analyzed ${completed} sources locally.${state.musicEnergy.length ? ' The timeline now uses motion, speech and clapping preferences when enabled.' : ' Analyze music to enable energy-matched clip selection.'}`);
+    } catch (error) {
+      if (currentVideo?.analysis) {
+        try {
+          const fingerprint = await desktopApi.getFootageFingerprint(currentVideo.path);
+          if (!footage.sameFingerprint(currentVideo.analysis.fingerprint, fingerprint)) {
+            currentVideo.analysis = null;
+            currentVideo.analysisEdits = null;
+            showNotice('analysisEditNotice', `${currentVideo.file.name} changed. Its analysis and range edits were discarded.`);
+          }
+        } catch (validationError) {
+          currentVideo.analysis = null;
+          currentVideo.analysisEdits = null;
+          showNotice('analysisEditNotice', `Could not validate saved ranges: ${validationError.message}. The stale ranges were discarded.`, 'warning');
+        }
+      }
+      if (completed || currentVideo) rebuildAutomaticEdit();
+      showNotice('footageNotice', task.cancelled
+        ? `Analysis canceled. Results for ${completed} completed sources were saved.`
+        : `Footage analysis failed: ${error.message}. Results for ${completed} completed sources were saved.`, task.cancelled ? 'status' : 'warning');
+    } finally {
+      unsubscribe();
+      footageTask = null;
+      $('cancelFootageButton').classList.add('hidden');
+      $('footageProgress').classList.add('hidden');
+      renderFootageAnalysis();
+      persistSession(true);
+    }
+  }
+
   function removeVideo(id) {
+    if (footageTask) {
+      showNotice('footageNotice', 'Cancel footage analysis before removing footage.', 'warning');
+      return;
+    }
     const video = getVideo(id);
     if (!video) return;
+    endAudioScrub(false);
+    audioScrubber.dispose();
     const cachedPlayer = previewPlayers.get(id);
     if (cachedPlayer) {
       cachedPlayer.pause();
@@ -896,11 +1889,24 @@
 
   async function analyzeMusic() {
     if (!state.music) return;
+    if (footageTask || musicAnalysisTask || activeExport) {
+      showNotice('analysisNotice', 'Wait for analysis or export to finish before analyzing music.', 'warning');
+      return;
+    }
+    const music = state.music;
+    musicAnalysisTask = music;
     $('analyzeButton').disabled = true;
     $('analysisLabel').textContent = 'Analyzing';
     showNotice('analysisNotice', 'Reading the track locally…');
+    renderFootageAnalysis();
     try {
-      state.audioBuffer = await decodeMusicBuffer();
+      const buffer = await decodeMusicBuffer();
+      if (state.music !== music) {
+        showNotice('analysisNotice', 'The music changed during analysis; old results were discarded.', 'warning');
+        return;
+      }
+      state.audioBuffer = buffer;
+      state.musicEnergy = footage.musicEnergy(state.audioBuffer);
       updateBeatAnalysis();
       $('waveEmpty').classList.add('hidden');
       updateDuration();
@@ -910,7 +1916,9 @@
       $('analysisLabel').textContent = 'Could not analyze';
       showNotice('analysisNotice', `This track could not be decoded by the browser: ${error.message}`);
     } finally {
+      musicAnalysisTask = null;
       $('analyzeButton').disabled = false;
+      renderFootageAnalysis();
     }
   }
 
@@ -1049,14 +2057,12 @@
       const group = state.beatCandidates.slice(index, index + cadence).filter((beat) => beat.hasAccent);
       if (group.length) selected.push(group.reduce((strongest, beat) => beat.strength > strongest.strength ? beat : strongest).time);
     }
-    state.beatTimes = selected.filter((time) => time > 0.12 && time < (state.audioBuffer?.duration || Infinity) - 0.12);
+    state.detectedCutTimes = selected.filter((time) => time > 0.12 && time < (duration() || Infinity) - 0.12);
+    refreshMusicCuts();
+    clearSelectedClip();
     state.edit = [];
     state.activeCut = null;
     setExportAvailability(false);
-    $('beatCount').textContent = `${state.beatTimes.length} cuts · ${Math.round(state.tempoBpm)} BPM`;
-    $('cutList').innerHTML = state.beatTimes.length
-      ? state.beatTimes.slice(0, 12).map((time, index) => `<li class="cut-row"><span>Cut ${String(index + 1).padStart(2, '0')}</span><span>${formatTime(time, true)}</span></li>`).join('')
-      : '<li class="cut-empty">No strong accents on this cadence. Increase sensitivity or choose every beat.</li>';
     $('statusText').textContent = `${state.beatTimes.length} cut points at ~${Math.round(state.tempoBpm)} BPM`;
     showNotice('analysisNotice', `Beat grid estimated at ~${Math.round(state.tempoBpm)} BPM. Keeping the strongest accent every ${cadence === 4 ? 'bar' : cadence === 2 ? '2 beats' : 'beat'}.`);
     drawWaveform();
@@ -1069,6 +2075,7 @@
     const sources = state.videos.filter((video) => video.duration > 0);
     const minimumClips = Number($('minimumConsecutiveClips').value) || 2;
     if (!total || !sources.length) {
+      clearSelectedClip();
       state.edit = [];
       state.activeCut = null;
       setExportAvailability(false);
@@ -1087,7 +2094,7 @@
 
     const cuts = [];
     const beats = state.beatTimes.filter((time) => time > 0.12 && time < total - 0.12);
-    if (beats.length) {
+    if (beats.length || state.tempoBpm > 0 || accents.hasEdits(state.musicCutOverrides)) {
       const boundaries = [0, ...beats, total];
       for (let index = 0; index < boundaries.length - 1; index++) {
         if (boundaries[index + 1] > boundaries[index]) cuts.push({ start: boundaries[index], end: boundaries[index + 1] });
@@ -1100,6 +2107,8 @@
     }
 
     const credits = new Map(sources.map((video) => [video.id, 0]));
+    const motionScale = Math.max(0.005, footage.percentile(sources.filter((video) => video.analysis)
+      .flatMap((video) => video.analysis.motion.map((range) => range.score)), 0.9));
     const result = [];
     let activeSourceId = null;
     let consecutiveClips = 0;
@@ -1116,7 +2125,10 @@
       let selected = eligibleSources.find((video) => video.id === activeSourceId);
       if (!selected || consecutiveClips >= minimumClips) {
         const totalWeight = eligibleSources.reduce((sum, video) => {
-          const weight = Number.isFinite(video.importance) ? video.importance : 1;
+          let weight = Number.isFinite(video.importance) ? video.importance : 1;
+          if (state.useFootageAnalysis && state.musicEnergy.length) {
+            weight *= footage.sourcePreference(video, cut, state.musicEnergy, motionScale);
+          }
           credits.set(video.id, (credits.get(video.id) || 0) + weight);
           return sum + weight;
         }, 0);
@@ -1162,6 +2174,10 @@
       }
     }
 
+    if (state.useFootageAnalysis && state.musicEnergy.length) {
+      footage.guideSourceStarts(result, sources, state.musicEnergy);
+    }
+    clearSelectedClip();
     state.edit = result;
     state.activeCut = null;
     setExportAvailability(result.length > 0);
@@ -1257,6 +2273,14 @@
     player.playsInline = true;
     player.volume = 0.65;
     if (player !== previewVideo) {
+      for (const name of ['timeupdate', 'seeked', 'playing', 'pause', 'ended']) player.addEventListener(name, () => {
+        if (activePreviewVideo !== player || !sourceAnalysisMode()) return;
+        updateAnalysisPlayhead();
+        updatePlayButton();
+        if (name === 'playing') startPlayheadAnimation();
+        if (name === 'pause' || name === 'ended') stopPlayheadAnimation();
+        if (name === 'pause' || name === 'ended') persistSession();
+      });
       player.addEventListener('loadedmetadata', () => { if (activePreviewVideo === player) drawPreviewFrame(); });
       player.addEventListener('seeked', () => { if (activePreviewVideo === player) drawPreviewFrame(); });
       player.addEventListener('pause', () => {
@@ -1377,11 +2401,193 @@
       previewCanvas.width = width;
       previewCanvas.height = height;
     }
-    previewContext.drawImage(activePreviewVideo, 0, 0, width, height);
+    try {
+      colors.render(previewContext, activePreviewVideo, getVideo(previewSourceId)?.color, 0, 0, width, height);
+      colorPreviewError = null;
+    } catch (error) {
+      if (colorPreviewError !== error.message) showNotice('colorNotice', `Color preview failed: ${error.message}`, 'warning');
+      colorPreviewError = error.message;
+      musicPlayer.pause();
+      activePreviewVideo.pause();
+      cancelPreviewRendering();
+    }
+  }
+
+  function startPlayheadAnimation() {
+    if (playheadAnimationFrameId !== null || activeExport) return;
+    const animate = () => {
+      playheadAnimationFrameId = null;
+      if (activeExport) return;
+      const player = sourceAnalysisMode() ? activePreviewVideo : musicPlayer;
+      syncPreview();
+      if (!player.paused && !player.ended) playheadAnimationFrameId = requestAnimationFrame(animate);
+    };
+    playheadAnimationFrameId = requestAnimationFrame(animate);
+  }
+
+  function stopPlayheadAnimation() {
+    if (playheadAnimationFrameId !== null) cancelAnimationFrame(playheadAnimationFrameId);
+    playheadAnimationFrameId = null;
+    syncPreview();
   }
 
   function closePreviewContextMenu() {
     previewContextMenu.classList.add('hidden');
+  }
+
+  function sourceSlipStartAtPointer(clientX, trackRect, grabOffset, sourceDuration, clipDuration) {
+    const sourceStart = (clientX - trackRect.left - grabOffset) / trackRect.width * sourceDuration;
+    return Math.min(Math.max(0, sourceStart), Math.max(0, sourceDuration - clipDuration));
+  }
+
+  function sourceStartForMarkedPoint(edge, currentTime, sourceDuration, clipDuration) {
+    const sourceStart = edge === 'start' ? currentTime : currentTime - clipDuration;
+    return Math.min(Math.max(0, sourceStart), Math.max(0, sourceDuration - clipDuration));
+  }
+
+  function updateClipSlipFromPointer(clientX, trackRect) {
+    if (selectedCutIndex === null) return;
+    const cut = state.edit[selectedCutIndex];
+    const video = cut && getVideo(cut.sourceId);
+    if (!cut || !video?.duration) return;
+    const sourceStart = sourceSlipStartAtPointer(
+      clientX, trackRect, sourceSlipDrag.offset, video.duration, cut.end - cut.start
+    );
+    updateClipSlipView(cut, video, sourceStart);
+  }
+
+  function updateClipSlipView(cut, video, sourceStart = cut.sourceStart, seekPreview = true) {
+    const clipDuration = cut.end - cut.start;
+    const maximumStart = Math.max(0, video.duration - clipDuration);
+    cut.sourceStart = Math.min(Math.max(0, sourceStart), maximumStart);
+    clipSlipWindow.style.left = `${cut.sourceStart / video.duration * 100}%`;
+    clipSlipWindow.style.width = `${Math.min(100, clipDuration / video.duration * 100)}%`;
+    clipSlipTrack.setAttribute('aria-valuemin', '0');
+    clipSlipTrack.setAttribute('aria-valuemax', String(maximumStart));
+    clipSlipTrack.setAttribute('aria-valuenow', String(cut.sourceStart));
+    clipSlipTrack.setAttribute('aria-valuetext', `${formatSourceTime(cut.sourceStart, true)} to ${formatSourceTime(cut.sourceStart + clipDuration, true)}`);
+    $('clipSlipRange').textContent = `Source: ${formatSourceTime(cut.sourceStart, true)} – ${formatSourceTime(cut.sourceStart + clipDuration, true)}`;
+    if (seekPreview && clipSlipPreview.readyState >= 1 && Math.abs(clipSlipPreview.currentTime - cut.sourceStart) > 0.04) {
+      clipSlipPreview.pause();
+      clipSlipPreview.currentTime = cut.sourceStart;
+    }
+    const timelineClip = $('videoTrack').querySelector(`[data-cut-index="${selectedCutIndex}"]`);
+    if (timelineClip) {
+      timelineClip.title = `${formatTime(cut.start, true)}-${formatTime(cut.end, true)} · ${video.file.name} at ${formatSourceTime(cut.sourceStart, true)}`;
+    }
+  }
+
+  function updateClipSlipPlayerTime() {
+    const playerTime = clipSlipPreview.currentTime;
+    $('clipSlipPlayerTime').textContent = `Player: ${Number.isFinite(playerTime) ? formatSourceTime(playerTime, true) : '00:00.0'}`;
+    const cut = selectedCutIndex === null ? null : state.edit[selectedCutIndex];
+    const video = cut && getVideo(cut.sourceId);
+    const valid = Boolean(!clipSlipOverlay.classList.contains('hidden') && clipSlipPreview.readyState >= 1
+      && cut && video?.duration && video.duration >= cut.end - cut.start);
+    const maximumStart = valid ? video.duration - (cut.end - cut.start) : 0;
+    $('clipSlipSetStart').disabled = !valid || playerTime > maximumStart + 0.001;
+    $('clipSlipSetEnd').disabled = !valid || playerTime + 0.001 < cut.end - cut.start;
+  }
+
+  function setClipSlipPoint(edge) {
+    const cut = selectedCutIndex === null ? null : state.edit[selectedCutIndex];
+    const video = cut && getVideo(cut.sourceId);
+    if (!cut || !video?.duration || clipSlipPreview.readyState < 1) return;
+    const playerTime = clipSlipPreview.currentTime;
+    const clipDuration = cut.end - cut.start;
+    clipSlipPreview.pause();
+    const sourceStart = sourceStartForMarkedPoint(edge, playerTime, video.duration, clipDuration);
+    updateClipSlipView(cut, video, sourceStart, false);
+    updateClipSlipPlayerTime();
+    persistSession();
+  }
+
+  function handleClipSlipTrackKeydown(event) {
+    if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key) || selectedCutIndex === null) return;
+    const cut = state.edit[selectedCutIndex];
+    const video = cut && getVideo(cut.sourceId);
+    if (!cut || !video?.duration) return;
+    event.preventDefault();
+    const step = event.shiftKey ? 1 : 0.1;
+    const nextStart = event.key === 'Home' ? 0
+      : event.key === 'End' ? video.duration - (cut.end - cut.start)
+        : cut.sourceStart + (event.key === 'ArrowLeft' ? -step : step);
+    updateClipSlipView(cut, video, nextStart);
+    persistSession();
+  }
+
+  function openClipSlipEditor() {
+    const cut = selectedCutIndex === null ? null : state.edit[selectedCutIndex];
+    const video = cut && getVideo(cut.sourceId);
+    if (!cut || !video) {
+      showNotice('generateNotice', 'Select a timeline clip before pressing F.', 'warning');
+      return;
+    }
+    if (!video.duration || !video.url) {
+      showNotice('generateNotice', 'Wait for the selected source video to finish loading before editing its segment.', 'warning');
+      return;
+    }
+    musicPlayer.pause();
+    pausePreviewPlayers();
+    $('clipSlipSourceName').textContent = video.file.name;
+    $('clipSlipTimelineRange').textContent = `Timeline clip: ${formatTime(cut.start, true)} – ${formatTime(cut.end, true)} · ${(cut.end - cut.start).toFixed(2)} s`;
+    $('clipSlipRuler').replaceChildren(...[0, 0.25, 0.5, 0.75, 1].map((fraction) => {
+      const mark = document.createElement('span');
+      mark.textContent = formatSourceTime(video.duration * fraction, true);
+      return mark;
+    }));
+    const cutIndex = selectedCutIndex;
+    const sourceUrl = video.url;
+    clipSlipOverlay.classList.remove('hidden');
+    clipSlipPreview.pause();
+    clipSlipPreview.addEventListener('loadedmetadata', () => {
+      if (selectedCutIndex !== cutIndex || clipSlipPreview.getAttribute('src') !== sourceUrl
+        || clipSlipOverlay.classList.contains('hidden')) return;
+      clipSlipPreview.currentTime = cut.sourceStart;
+      updateClipSlipView(cut, video);
+      updateClipSlipPlayerTime();
+    }, { once: true });
+    clipSlipPreview.src = video.url;
+    if (clipSlipPreview.readyState >= 1) {
+      clipSlipPreview.currentTime = cut.sourceStart;
+      updateClipSlipView(cut, video);
+      updateClipSlipPlayerTime();
+    } else updateClipSlipView(cut, video);
+    $('closeClipSlip').focus();
+  }
+
+  function closeClipSlipEditor() {
+    if (clipSlipOverlay.classList.contains('hidden')) return;
+    sourceSlipDrag = null;
+    clipSlipTrack.classList.remove('dragging');
+    clipSlipOverlay.classList.add('hidden');
+    clipSlipPreview.pause();
+    clipSlipPreview.removeAttribute('src');
+    clipSlipPreview.load();
+    syncPreview(true);
+    persistSession();
+    $('videoTrack').querySelector(`[data-cut-index="${selectedCutIndex}"]`)?.focus({ preventScroll: true });
+  }
+
+  function clearSelectedClip() {
+    if (!clipSlipOverlay.classList.contains('hidden')) closeClipSlipEditor();
+    selectedCutIndex = null;
+    sourceSlipDrag = null;
+  }
+
+  function handleClipSlipShortcut(event) {
+    if (event.key === 'Escape' && !clipSlipOverlay.classList.contains('hidden')) {
+      event.preventDefault();
+      closeClipSlipEditor();
+      return;
+    }
+    if (event.defaultPrevented || event.repeat || event.ctrlKey || event.metaKey || event.altKey
+      || event.key.toLowerCase() !== 'f'
+      || event.target?.closest?.('input, select, textarea, [contenteditable]:not([contenteditable="false"])')
+      || state.workspace !== 'editing' || activeExport
+      || !clipSlipOverlay.classList.contains('hidden')) return;
+    event.preventDefault();
+    openClipSlipEditor();
   }
 
   function cancelPreviewRendering() {
@@ -1411,11 +2617,23 @@
   }
 
   function syncPreview(force = false) {
+    if (sourceAnalysisMode()) {
+      updateAnalysisPlayhead();
+      return;
+    }
     const time = musicPlayer.currentTime || 0;
     $('timeDisplay').textContent = formatTime(time, true);
     $('monitorTime').textContent = `TIMECODE ${formatTime(time, true)}`;
     const total = duration();
     $('playhead').style.left = `${total ? Math.min(100, time / total * 100) : 0}%`;
+    if (state.workspace === 'analysis' || state.workspace === 'color') {
+      pausePreviewPlayers();
+      previewCanvas.classList.add('hidden');
+      $('monitorEmpty').classList.remove('hidden');
+      $('monitorSource').textContent = state.workspace === 'color' ? 'No source selected' : state.music?.file.name || 'No music selected';
+      renderPlayhead();
+      return;
+    }
     const cut = state.edit.find((item) => time >= item.start && time < item.end);
     if (cut) {
       const video = getVideo(cut.sourceId);
@@ -1424,7 +2642,10 @@
           state.activeCut = cut;
           setPreviewSource(video, cut.sourceStart + time - cut.start);
         }
-        if (state.playing && activePreviewVideo.paused) activePreviewVideo.play().catch((error) => showNotice('generateNotice', `Preview playback failed: ${error.message}`));
+        if (state.playing && activePreviewVideo.paused) activePreviewVideo.play().catch((error) => {
+          musicPlayer.pause();
+          showNotice('generateNotice', `Preview playback failed: ${error.message}`, 'warning');
+        });
         $('monitorSource').textContent = `${video.file.name} · ${formatSourceTime(cut.sourceStart + time - cut.start, true)}`;
       }
     } else if (state.edit.length) {
@@ -1435,6 +2656,8 @@
   }
 
   function setPreviewSource(video, offset) {
+    previewSourceId = video.id;
+    colorPreviewError = null;
     const player = getPreviewPlayer(video);
     if (player !== activePreviewVideo) {
       cancelPreviewRendering();
@@ -1450,7 +2673,8 @@
       player.src = video.url;
       player.addEventListener('loadedmetadata', () => {
         if (activePreviewVideo !== player) return;
-        player.currentTime = Math.max(0, Math.min(offset, video.duration ? video.duration - 0.05 : 0));
+        const target = sourceAnalysisMode() && state.analysisTarget === video.id ? state.analysisTime : offset;
+        player.currentTime = Math.max(0, Math.min(target, video.duration ? video.duration - 0.05 : 0));
         drawPreviewFrame();
         if (state.playing) player.play().catch((error) => showNotice('generateNotice', `Preview playback failed: ${error.message}`));
       }, { once: true });
@@ -1463,8 +2687,32 @@
     $('monitorSource').textContent = video.file.name;
   }
 
+  function handlePlaybackShortcut(event) {
+    if ((event.code !== 'Space' && event.key !== ' ') || event.defaultPrevented
+      || event.ctrlKey || event.metaKey || event.altKey || event.shiftKey
+      || event.target.closest('input, select, textarea, [contenteditable]:not([contenteditable="false"])')) return;
+    event.preventDefault();
+    if (!event.repeat && !activeExport) togglePlayback();
+  }
+
   function togglePlayback() {
-    if (!state.music) return;
+    audioScrubber.stop();
+    resumeAfterScrub = false;
+    if (sourceAnalysisMode()) {
+      if (activePreviewVideo.paused) {
+        if (activePreviewVideo.ended) seekAnalysisSource(0);
+        activePreviewVideo.play().catch((error) => showNotice('analysisEditNotice', `Source playback failed: ${error.message}`, 'warning'));
+      } else activePreviewVideo.pause();
+      return;
+    }
+    if (state.workspace === 'color' || !state.music) return;
+    if (state.workspace === 'analysis') {
+      if (musicPlayer.paused) {
+        if (musicPlayer.ended) musicPlayer.currentTime = 0;
+        musicPlayer.play().catch((error) => showNotice('analysisEditNotice', `Music playback failed: ${error.message}`, 'warning'));
+      } else musicPlayer.pause();
+      return;
+    }
     if (musicPlayer.paused) {
       if (duration() && musicPlayer.currentTime >= duration()) musicPlayer.currentTime = 0;
       preparePlayback();
@@ -1472,6 +2720,15 @@
   }
 
   function updateAudioToggles() {
+    audioScrubber.stop();
+    clipSlipPreview.muted = !state.clipAudioEnabled;
+    clipSlipPreview.volume = 0.65;
+    $('scrubAudioToggle').textContent = `Scrub audio: ${state.scrubAudioEnabled ? 'On' : 'Off'}`;
+    $('scrubAudioToggle').setAttribute('aria-pressed', String(state.scrubAudioEnabled));
+    musicPlayer.volume = state.musicVolume;
+    $('musicVolume').value = String(Math.round(state.musicVolume * 100));
+    $('musicVolumeValue').textContent = `${Math.round(state.musicVolume * 100)}%`;
+    $('musicVolume').setAttribute('aria-valuetext', `${Math.round(state.musicVolume * 100)} percent`);
     musicPlayer.muted = !state.musicAudioEnabled;
     updatePreviewPlayerAudio();
     $('musicAudioToggle').textContent = state.musicAudioEnabled ? 'On' : 'Off';
@@ -1480,11 +2737,15 @@
     $('clipAudioToggle').textContent = state.clipAudioEnabled ? 'On' : 'Off';
     $('clipAudioToggle').setAttribute('aria-pressed', String(state.clipAudioEnabled));
     $('clipAudioToggle').setAttribute('aria-label', state.clipAudioEnabled ? 'Mute source clip audio' : 'Unmute source clip audio');
+    $('analysisSourceAudioToggle').textContent = state.clipAudioEnabled ? 'On' : 'Off';
+    $('analysisSourceAudioToggle').setAttribute('aria-pressed', String(state.clipAudioEnabled));
+    $('analysisSourceAudioToggle').setAttribute('aria-label', state.clipAudioEnabled ? 'Mute source audio' : 'Unmute source audio');
   }
 
   function updatePlayButton() {
-    $('playButton').textContent = state.playing ? 'Ⅱ' : '▶';
-    $('playButton').setAttribute('aria-label', state.playing ? 'Pause' : 'Play');
+    const playing = sourceAnalysisMode() ? !activePreviewVideo.paused : state.playing;
+    $('playButton').textContent = playing ? 'Ⅱ' : '▶';
+    $('playButton').setAttribute('aria-label', playing ? 'Pause' : 'Play');
   }
 
   function seekFromWaveform(event) {
@@ -1496,6 +2757,16 @@
   }
 
   function seekEditPoint(direction) {
+    if (sourceAnalysisMode()) {
+      const video = getVideo(state.analysisTarget);
+      const points = state.workspace === 'color' ? [0, video.duration]
+        : currentFootageRanges().flatMap((range) => [range.start, range.end]).sort((left, right) => left - right);
+      const target = direction < 0 ? points.filter((time) => time < state.analysisTime - 0.05).pop() ?? 0
+        : points.find((time) => time > state.analysisTime + 0.05) ?? video.duration;
+      seekAnalysisSource(target);
+      persistSession();
+      return;
+    }
     if (!duration()) return;
     const points = state.edit.length ? state.edit.map((cut) => cut.start) : state.beatTimes;
     const currentTime = musicPlayer.currentTime || 0;
@@ -1509,8 +2780,9 @@
 
   function attachPlayheadDrag(container) {
     container.addEventListener('pointerdown', (event) => {
-      if (!event.target.closest('.playhead')) return;
+      if (event.button !== 0 || activeExport || !event.target.closest('.playhead')) return;
       event.preventDefault();
+      beginAudioScrub();
       playheadDrag = { pointerId: event.pointerId, container };
       container.setPointerCapture(event.pointerId);
       seekToTimelineX(event.clientX, container);
@@ -1521,20 +2793,66 @@
     container.addEventListener('pointerup', (event) => {
       if (playheadDrag?.pointerId !== event.pointerId || playheadDrag.container !== container) return;
       playheadDrag = null;
+      endAudioScrub();
       suppressWaveClick = container === waveWrap;
       persistSession();
     });
-    container.addEventListener('pointercancel', (event) => {
-      if (playheadDrag?.pointerId === event.pointerId && playheadDrag.container === container) playheadDrag = null;
+    for (const name of ['pointercancel', 'lostpointercapture']) container.addEventListener(name, (event) => {
+      if (playheadDrag?.pointerId !== event.pointerId || playheadDrag.container !== container) return;
+      playheadDrag = null;
+      endAudioScrub();
     });
   }
 
   function seekToTimelineX(clientX, container) {
     if (!duration()) return;
     const rect = container.getBoundingClientRect();
-    const progress = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+    const headerWidth = container.id === 'musicTimelineContent' ? trackHeaderWidth : 0;
+    const timeWidth = rect.width - headerWidth;
+    if (timeWidth <= 0) return;
+    const progress = Math.max(0, Math.min(1, (clientX - rect.left - headerWidth) / timeWidth));
     musicPlayer.currentTime = progress * duration();
     syncPreview(true);
+    previewScrubAudio();
+  }
+
+  function beginAudioScrub() {
+    audioScrubber.stop();
+    resumeAfterScrub = false;
+    if (!state.scrubAudioEnabled || activeExport) return;
+    resumeAfterScrub = sourceAnalysisMode() ? !activePreviewVideo.paused : !musicPlayer.paused;
+    musicPlayer.pause();
+    pausePreviewPlayers();
+  }
+
+  function endAudioScrub(resume = true) {
+    audioScrubber.stop();
+    const wasPlaying = resumeAfterScrub;
+    resumeAfterScrub = false;
+    if (resume && wasPlaying && !activeExport) togglePlayback();
+  }
+
+  function previewScrubAudio() {
+    if (!state.scrubAudioEnabled || activeExport) return;
+    const tracks = [];
+    if (sourceAnalysisMode()) {
+      const video = getVideo(state.analysisTarget);
+      if (video && state.clipAudioEnabled) tracks.push({
+        key: 'source', url: video.url, time: state.analysisTime, volume: activePreviewVideo.volume
+      });
+    } else {
+      const time = musicPlayer.currentTime;
+      if (state.music && state.musicAudioEnabled) tracks.push({
+        key: 'music', url: state.music.url, time, volume: state.musicVolume
+      });
+      const cut = state.workspace === 'editing' && state.edit.find((cut) => time >= cut.start && time < cut.end);
+      const video = cut && getVideo(cut.sourceId);
+      if (video && state.clipAudioEnabled) tracks.push({
+        key: 'source', url: video.url, time: cut.sourceStart + time - cut.start,
+        end: cut.sourceStart + cut.end - cut.start, volume: activePreviewVideo.volume
+      });
+    }
+    audioScrubber.preview(tracks);
   }
 
   function updateDuration() {
@@ -1545,25 +2863,38 @@
   }
 
   function renderRuler() {
-    const total = duration();
+    renderTimeRuler($('timeRuler'), duration(), formatTime);
+  }
+
+  function renderTimeRuler(element, total, formatter) {
     if (!total) {
-      $('timeRuler').innerHTML = '';
+      element.innerHTML = '';
       return;
     }
-    const rawStep = total / 8;
+    const zoom = element.id === 'sourceAnalysisRuler' ? timelineZoom.footage : timelineZoom.music;
+    const viewport = $(element.id === 'sourceAnalysisRuler' ? 'sourceTimelineViewport' : 'musicTimelineViewport');
+    const visibleTicks = Math.max(2, Math.floor((viewport.clientWidth - trackHeaderWidth) / 80));
+    const rawStep = total / (visibleTicks * zoom);
     const magnitude = 10 ** Math.floor(Math.log10(rawStep));
     const normalized = rawStep / magnitude;
     const step = magnitude * (normalized <= 1 ? 1 : normalized <= 2 ? 2 : normalized <= 5 ? 5 : 10);
     const ticks = [];
     for (let time = 0; time < total; time += step) ticks.push(time);
     if (total - ticks[ticks.length - 1] > step * 0.35) ticks.push(total);
-    $('timeRuler').innerHTML = ticks.map((time, index) => `<span class="ruler-mark ${index === ticks.length - 1 ? 'edge' : ''}" style="left:${time / total * 100}%">${formatTime(time)}</span>`).join('');
+    const precision = step >= 1 ? 0 : step >= 0.1 ? 1 : step >= 0.01 ? 2 : 3;
+    const scale = 10 ** precision;
+    element.innerHTML = ticks.map((time, index) => {
+      const rounded = Math.round(time * scale);
+      const label = precision ? `${formatter(Math.floor(rounded / scale))}.${String(rounded % scale).padStart(precision, '0')}` : formatter(time);
+      return `<span class="ruler-mark ${index === ticks.length - 1 ? 'edge' : ''}" style="left:${time / total * 100}%">${label}</span>`;
+    }).join('');
   }
 
   function renderVideoTrack() {
     const lane = $('videoTrack');
     if (!lane) return;
     const total = duration();
+    if (selectedCutIndex !== null && !state.edit[selectedCutIndex]) selectedCutIndex = null;
     const colors = ['#c9ef74', '#83b9d1', '#ff806b', '#d8a56a', '#bcb7ea'];
     const clips = total ? state.edit.map((cut, index) => {
       const video = getVideo(cut.sourceId);
@@ -1573,19 +2904,26 @@
       const color = colors[state.videos.indexOf(video) % colors.length];
       const label = width >= 8 ? escapeHtml(video.file.name) : '';
       const title = `${formatTime(cut.start, true)}-${formatTime(cut.end, true)} · ${video.file.name} at ${formatSourceTime(cut.sourceStart, true)}`;
-      return `<button type="button" class="video-clip" data-cut-index="${index}" style="left:${left}%;width:${width}%;--clip-color:${color}" title="${escapeHtml(title)}">${label}</button>`;
+      const selected = selectedCutIndex === index;
+      return `<button type="button" class="video-clip ${selected ? 'selected' : ''}" data-cut-index="${index}" aria-pressed="${selected}" style="left:${left}%;width:${width}%;--clip-color:${color}" title="${escapeHtml(title)}">${label}</button>`;
     }).join('') : '';
-    lane.innerHTML = `${clips || '<div class="video-track-empty">Automatic clips appear here when music and footage are loaded</div>'}<div class="playhead track-playhead" id="trackPlayhead"></div>`;
-    $('trackPlayhead').style.left = `${total ? Math.min(100, musicPlayer.currentTime / total * 100) : 0}%`;
+    lane.innerHTML = clips || '<div class="video-track-empty">Automatic clips appear here when music and footage are loaded</div>';
+    renderPlayhead();
   }
 
   function drawWaveform() {
-    const rect = canvas.getBoundingClientRect();
+    updateTimelineWidths();
+    renderMusicAccentEditor();
+    const viewport = $('musicTimelineViewport');
+    const rect = $('waveWrap').getBoundingClientRect();
+    const width = Math.max(0, viewport.clientWidth - trackHeaderWidth);
+    const offset = viewport.scrollLeft;
+    canvas.style.width = `${width}px`;
+    canvas.style.left = `${offset}px`;
     const ratio = window.devicePixelRatio || 1;
-    canvas.width = Math.max(1, Math.floor(rect.width * ratio));
+    canvas.width = Math.max(1, Math.floor(width * ratio));
     canvas.height = Math.max(1, Math.floor(rect.height * ratio));
     context.setTransform(ratio, 0, 0, ratio, 0, 0);
-    const width = rect.width;
     const height = rect.height;
     context.clearRect(0, 0, width, height);
     if (!state.audioBuffer) {
@@ -1594,19 +2932,18 @@
     }
     const data = state.audioBuffer.getChannelData(0);
     const middle = height / 2;
-    const step = Math.max(1, Math.floor(data.length / width));
     context.fillStyle = '#9ab84d';
     for (let x = 0; x < width; x++) {
-      const start = x * step;
-      const end = Math.min(data.length, start + step);
+      const start = Math.floor((offset + x) / rect.width * data.length);
+      const end = Math.min(data.length, Math.ceil((offset + x + 1) / rect.width * data.length));
       let peak = 0;
       for (let index = start; index < end; index++) peak = Math.max(peak, Math.abs(data[index]));
       const barHeight = Math.max(1, peak * (height * 0.82));
       context.fillRect(x, middle - barHeight / 2, 1, barHeight);
     }
     const total = duration();
-    for (const time of state.beatTimes) {
-      const x = time / total * width;
+    for (const time of state.workspace === 'analysis' ? [] : state.beatTimes) {
+      const x = time / total * rect.width - offset;
       context.fillStyle = '#ff806b';
       context.fillRect(x, 0, 1, height);
     }
@@ -1615,8 +2952,10 @@
 
   function renderPlayhead() {
     const total = duration();
-    $('playhead').style.left = `${total ? Math.min(100, musicPlayer.currentTime / total * 100) : 0}%`;
-    $('trackPlayhead').style.left = `${total ? Math.min(100, musicPlayer.currentTime / total * 100) : 0}%`;
+    const progress = total ? Math.min(1, musicPlayer.currentTime / total) : 0;
+    $('playhead').style.left = `${progress * 100}%`;
+    const content = $('musicTimelineContent');
+    $('timelinePlayhead').style.left = `${trackHeaderWidth + Math.max(0, content.clientWidth - trackHeaderWidth) * progress}px`;
   }
 
   function exportEdit() {
@@ -1741,6 +3080,7 @@
 
   async function exportVideo() {
     if (!state.music || !state.edit.length || activeExport) return;
+    endAudioScrub(false);
     showNotice('generateNotice', '');
     if (!desktopApi?.beginVideoExport) {
       showNotice('generateNotice', 'Video export is available in the AutoEdit desktop app.');
@@ -1758,6 +3098,8 @@
 
     const task = { cancelled: false, recorder: null, controller: new AbortController() };
     activeExport = task;
+    $('musicVolume').disabled = true;
+    renderFootageAnalysis();
     $('exportOverlay').classList.remove('hidden');
     $('exportMessage').textContent = 'Preparing music and source footage…';
     $('exportProgress').value = 0;
@@ -1807,7 +3149,6 @@
       exportContext.fillRect(0, 0, exportCanvas.width, exportCanvas.height);
 
       exportPhase = 'initializing audio and video capture';
-      outputStream = exportCanvas.captureStream(30);
       audioContext = new (window.AudioContext || window.webkitAudioContext)();
       const audioDestination = audioContext.createMediaStreamDestination();
 
@@ -1820,7 +3161,7 @@
       checkCancelled();
       const musicSource = audioContext.createMediaElementSource(music);
       const musicGain = audioContext.createGain();
-      musicGain.gain.value = state.musicAudioEnabled ? 1 : 0;
+      musicGain.gain.value = state.musicAudioEnabled ? state.musicVolume : 0;
       musicSource.connect(musicGain).connect(audioDestination);
 
       const usedSourceIds = new Set(cuts.map((cut) => cut.sourceId));
@@ -1847,27 +3188,37 @@
       }
 
       checkCancelled();
-      for (const track of audioDestination.stream.getAudioTracks()) outputStream.addTrack(track);
       const options = { mimeType, videoBitsPerSecond: 8000000, audioBitsPerSecond: 192000 };
-      exportPhase = 'starting the MP4 encoder';
-      task.recorder = new MediaRecorder(outputStream, options);
-      const recorder = task.recorder;
+      let recorder = null;
+      let resolveRecorderStopped;
+      let rejectRecorderStopped;
       recorderStopped = new Promise((resolve, reject) => {
-        recorder.addEventListener('stop', resolve, { once: true });
+        resolveRecorderStopped = resolve;
+        rejectRecorderStopped = reject;
+      });
+      const startEncoder = () => {
+        // Capture only after painting the first frame, not the initial black render surface.
+        outputStream = exportCanvas.captureStream(30);
+        for (const track of audioDestination.stream.getAudioTracks()) outputStream.addTrack(track);
+        task.recorder = new MediaRecorder(outputStream, options);
+        recorder = task.recorder;
+        recorder.addEventListener('stop', resolveRecorderStopped, { once: true });
         recorder.addEventListener('error', (event) => {
-          reject(new Error(`MP4 encoder error: ${describeExportError(event.error || new Error('The encoder supplied no error details.'))}`));
+          rejectRecorderStopped(new Error(`MP4 encoder error: ${describeExportError(event.error || new Error('The encoder supplied no error details.'))}`));
         }, { once: true });
-      });
-      recorder.addEventListener('dataavailable', (event) => {
-        if (!event.data.size) return;
-        writeChain = writeChain.then(async () => {
-          if (writeError) return;
-          await desktopApi.writeVideoExport(new Uint8Array(await event.data.arrayBuffer()));
-        }).catch((error) => {
-          writeError = new Error(`Could not write encoded video data to "${filePath}": ${describeExportError(error)}`);
-          stopRecorder();
+        recorder.addEventListener('dataavailable', (event) => {
+          if (!event.data.size) return;
+          writeChain = writeChain.then(async () => {
+            if (writeError) return;
+            await desktopApi.writeVideoExport(new Uint8Array(await event.data.arrayBuffer()));
+          }).catch((error) => {
+            writeError = new Error(`Could not write encoded video data to "${filePath}": ${describeExportError(error)}`);
+            stopRecorder();
+          });
         });
-      });
+        recorder.start(1000);
+        recorderStarted = true;
+      };
 
       await audioContext.resume();
       checkCancelled();
@@ -1912,7 +3263,7 @@
         if (nextCut !== currentCut) {
           currentCut = nextCut;
           music.pause();
-          if (recorder.state === 'recording') recorder.pause();
+          if (recorder?.state === 'recording') recorder.pause();
           activePlayer = nextCut ? exportPlayers.get(nextCut.sourceId).player : null;
           activePlayerReady = false;
           lastProgressSecond = -1;
@@ -1934,11 +3285,10 @@
             const scale = Math.min(exportCanvas.width / activePlayer.videoWidth, exportCanvas.height / activePlayer.videoHeight);
             const width = activePlayer.videoWidth * scale;
             const height = activePlayer.videoHeight * scale;
-            exportContext.drawImage(activePlayer, (exportCanvas.width - width) / 2, (exportCanvas.height - height) / 2, width, height);
+            colors.render(exportContext, activePlayer, getVideo(currentCut.sourceId)?.color, (exportCanvas.width - width) / 2, (exportCanvas.height - height) / 2, width, height);
           }
           if (!recorderStarted) {
-            recorder.start(1000);
-            recorderStarted = true;
+            startEncoder();
           } else if (recorder.state === 'paused') {
             recorder.resume();
           }
@@ -2019,6 +3369,8 @@
       $('exportOverlay').classList.add('hidden');
       $('cancelExportButton').disabled = false;
       activeExport = null;
+      $('musicVolume').disabled = false;
+      renderFootageAnalysis();
     }
   }
 
@@ -2031,14 +3383,15 @@
   drawWaveform();
   renderVideoTrack();
   renderSceneWeights();
-  musicPlayer.volume = 0.8;
   previewVideo.volume = 0.65;
   updateAudioToggles();
   setupPanelResizers();
+  setWorkspace('editing', false);
   setExportAvailability(false);
   restoreSession();
   if (!desktopApi) $('statusText').textContent = 'Browser preview only. Session auto-save requires the AutoEdit desktop app.';
   window.addEventListener('beforeunload', () => {
+    audioScrubber.dispose();
     persistSession(true);
     state.objectUrls.forEach((url) => URL.revokeObjectURL(url));
   });

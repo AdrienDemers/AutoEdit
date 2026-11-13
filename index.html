@@ -8,7 +8,7 @@
   <link rel="stylesheet" href="renderer/styles.css">
 </head>
 <body>
-  <div class="app">
+  <div class="app" data-workspace="editing" data-analysis-target="music">
     <header class="topbar">
       <div class="brand"><div class="brand-mark"><span>A</span></div><div class="brand-name">AUTOEDIT</div></div>
       <div class="project-name" id="projectName">Untitled music video</div>
@@ -29,7 +29,22 @@
       <button class="button" id="exportButton" disabled title="Export the generated edit list as CSV">Export edit list</button>
     </header>
 
-    <div class="layout" id="layout">
+    <nav class="workspace-bar" aria-label="Editing workspaces">
+      <div class="workspace-tabs" role="tablist" aria-label="Workspace">
+        <button class="workspace-tab" id="analysisWorkspaceTab" role="tab" aria-selected="false" aria-controls="layout" tabindex="-1" data-workspace-target="analysis">Analysis</button>
+        <button class="workspace-tab" id="editingWorkspaceTab" role="tab" aria-selected="true" aria-controls="layout" data-workspace-target="editing">Editing</button>
+        <button class="workspace-tab" id="colorWorkspaceTab" role="tab" aria-selected="false" aria-controls="layout" tabindex="-1" data-workspace-target="color">Color</button>
+      </div>
+      <label class="analysis-target-control" data-workspace-only="analysis" hidden for="analysisTarget">Analyze
+        <select id="analysisTarget"><option value="music">Music</option></select>
+      </label>
+      <label class="analysis-target-control" data-workspace-only="color" hidden for="colorTarget">Source
+        <select id="colorTarget"><option value="">Import footage</option></select>
+      </label>
+      <span class="workspace-hint" id="workspaceHint">Assemble, preview and export your edit.</span>
+    </nav>
+
+    <div class="layout" id="layout" role="tabpanel" aria-labelledby="editingWorkspaceTab">
       <aside class="library" id="library">
         <section class="library-group">
           <h2 class="section-heading">Music <span id="musicDuration">No track</span></h2>
@@ -47,7 +62,7 @@
 
       <main class="workbench" id="workbench">
         <div class="workbench-bar">
-          <div class="workbench-title">Assembly</div>
+          <div class="workbench-title" id="workbenchTitle">Assembly</div>
           <div class="workbench-status" id="statusText">Import a song and footage to get started</div>
           <div class="spacer"></div>
         </div>
@@ -70,38 +85,95 @@
         <div class="panel-resizer horizontal workbench-resizer" id="workbenchResizer" role="separator" aria-label="Resize preview and timeline" aria-controls="monitor timelinePanel" aria-orientation="horizontal" aria-valuemin="25" aria-valuenow="60" aria-valuemax="75" tabindex="0" title="Drag to resize the preview and timeline"></div>
         <div class="transport-bar" aria-label="Playback controls">
           <button class="icon-button" id="previousButton" aria-label="Previous edit point" title="Previous edit point">|◀</button>
-          <button class="icon-button" id="playButton" aria-label="Play" title="Play or pause">▶</button>
+          <button class="icon-button" id="playButton" aria-label="Play" aria-keyshortcuts="Space" title="Play or pause (Space)">▶</button>
           <button class="icon-button" id="nextButton" aria-label="Next edit point" title="Next edit point">▶|</button>
           <div class="transport-time" id="timeDisplay">00:00.0</div>
+          <button class="button" id="scrubAudioToggle" type="button" aria-pressed="false" title="Preview short audio snippets while dragging the playhead">Scrub audio: Off</button>
         </div>
         <section class="timeline" id="timelinePanel">
           <div class="timeline-top">
             <div class="timeline-title">Music timeline</div>
             <div class="timeline-duration" id="timelineDuration">00:00</div>
+            <label class="music-volume-control" for="musicVolume">Music volume
+              <input id="musicVolume" type="range" min="0" max="100" step="1" value="80">
+              <output id="musicVolumeValue" for="musicVolume">80%</output>
+            </label>
             <div class="spacer"></div>
-            <div class="timeline-help">Click waveform to seek</div>
+            <div class="timeline-help" id="timelineHelp">Click waveform to seek</div>
           </div>
-          <div class="timeline-ruler" id="timeRuler"></div>
-          <div class="audio-track">
-            <div class="track-control">
-              <span class="track-control-name">A1</span>
-              <button class="track-audio-toggle" id="musicAudioToggle" aria-pressed="true" title="Toggle music track audio">On</button>
-            </div>
-            <div class="audio-track-content">
-              <div class="wave-wrap" id="waveWrap">
-                <canvas id="waveform"></canvas>
-                <div class="timeline-empty" id="waveEmpty">Import music to view waveform and suggested edit points</div>
-                <div class="playhead" id="playhead"></div>
+          <div class="accent-toolbar" data-workspace-only="analysis" hidden>
+            <button class="button" id="addMusicAccent" disabled>Add accent at playhead</button>
+            <button class="button" id="removeMusicAccent" disabled>Remove selected accent</button>
+            <button class="button" id="resetMusicAccents" disabled>Reset accent edits</button>
+            <span id="selectedMusicAccent">No accent selected</span>
+          </div>
+          <div class="accent-toolbar" data-workspace-only="editing">
+            <button class="button" id="deleteMusicMarker" disabled>Delete selected marker</button>
+            <span id="selectedMusicMarker">No marker selected</span>
+          </div>
+          <div class="timeline-viewport" id="musicTimelineViewport" aria-label="Music timeline; Ctrl+mouse wheel to zoom">
+            <div class="timeline-content" id="musicTimelineContent">
+              <div class="timeline-ruler" id="timeRuler"></div>
+              <div class="audio-track">
+                <div class="track-control">
+                  <span class="track-control-name">A1</span>
+                  <button class="track-audio-toggle" id="musicAudioToggle" aria-pressed="true" title="Toggle music track audio">On</button>
+                </div>
+                <div class="audio-track-content">
+                  <div class="wave-wrap" id="waveWrap">
+                    <canvas id="waveform"></canvas>
+                    <div id="accentMarkers" class="accent-markers"></div>
+                    <div class="timeline-empty" id="waveEmpty">Import music to view waveform and suggested edit points</div>
+                    <div class="playhead" id="playhead"></div>
+                  </div>
+                  <div class="track-label"><span class="track-dot"></span><span id="trackName">MUSIC</span><span class="beat-count" id="beatCount">No edit points</span></div>
+                </div>
               </div>
-              <div class="track-label"><span class="track-dot"></span><span id="trackName">MUSIC</span><span class="beat-count" id="beatCount">No edit points</span></div>
+              <div class="video-track" data-workspace-only="editing">
+                <div class="video-track-control">
+                  <span class="track-control-name">V1</span>
+                  <button class="track-audio-toggle" id="clipAudioToggle" aria-pressed="true" title="Toggle source clip audio">On</button>
+                </div>
+                <div class="video-track-lane" id="videoTrack"><div class="video-track-empty">Automatic clips appear here when music and footage are loaded</div></div>
+              </div>
+              <div class="playhead timeline-playhead" id="timelinePlayhead" aria-hidden="true"></div>
             </div>
           </div>
-          <div class="video-track">
-            <div class="video-track-control">
-              <span class="track-control-name">V1</span>
-              <button class="track-audio-toggle" id="clipAudioToggle" aria-pressed="true" title="Toggle source clip audio">On</button>
+          <div class="timeline-navigator" id="musicTimelineNavigator" data-timeline-kind="music">
+            <button class="navigator-fit" type="button" title="Show the full music timeline">Fit</button>
+            <div class="navigator-rail" title="Drag the middle to pan; drag either end to zoom">
+              <div class="navigator-window">
+                <button class="navigator-handle" data-navigator-edge="start" type="button" role="slider" aria-label="Start of visible music range" aria-orientation="horizontal"></button>
+                <div class="navigator-pan" role="scrollbar" tabindex="0" aria-label="Visible music timeline range" aria-controls="musicTimelineViewport" aria-orientation="horizontal"><span class="navigator-grip" aria-hidden="true"></span></div>
+                <button class="navigator-handle" data-navigator-edge="end" type="button" role="slider" aria-label="End of visible music range" aria-orientation="horizontal"></button>
+              </div>
             </div>
-            <div class="video-track-lane" id="videoTrack"><div class="video-track-empty">Automatic clips appear here when music and footage are loaded</div><div class="playhead track-playhead" id="trackPlayhead"></div></div>
+          </div>
+        </section>
+        <section class="timeline source-analysis-panel" id="sourceAnalysisPanel" aria-label="Source analysis timeline" hidden>
+          <div class="timeline-top">
+            <div class="timeline-title" id="sourceAnalysisName">Source analysis</div>
+            <div class="timeline-duration" id="sourceAnalysisDuration">00:00</div>
+            <button class="track-audio-toggle" id="analysisSourceAudioToggle" aria-pressed="true" title="Toggle source audio">On</button>
+            <div class="spacer"></div>
+            <div class="timeline-help" id="sourceTimelineHelp">Click ranges to edit; drag empty track to scrub</div>
+          </div>
+          <div class="field-hint" id="sourceAnalysisStatus"></div>
+          <div class="timeline-viewport" id="sourceTimelineViewport" aria-label="Source timeline; Ctrl+mouse wheel to zoom">
+            <div class="timeline-content" id="sourceTimelineContent">
+              <div class="timeline-ruler" id="sourceAnalysisRuler"></div>
+              <div id="sourceAnalysisTracks" class="source-analysis-tracks"></div>
+            </div>
+          </div>
+          <div class="timeline-navigator" id="sourceTimelineNavigator" data-timeline-kind="footage">
+            <button class="navigator-fit" type="button" title="Show the full source timeline">Fit</button>
+            <div class="navigator-rail" title="Drag the middle to pan; drag either end to zoom">
+              <div class="navigator-window">
+                <button class="navigator-handle" data-navigator-edge="start" type="button" role="slider" aria-label="Start of visible source range" aria-orientation="horizontal"></button>
+                <div class="navigator-pan" role="scrollbar" tabindex="0" aria-label="Visible source timeline range" aria-controls="sourceTimelineViewport" aria-orientation="horizontal"><span class="navigator-grip" aria-hidden="true"></span></div>
+                <button class="navigator-handle" data-navigator-edge="end" type="button" role="slider" aria-label="End of visible source range" aria-orientation="horizontal"></button>
+              </div>
+            </div>
           </div>
         </section>
       </main>
@@ -109,9 +181,9 @@
       <div class="panel-resizer inspector-resizer" id="inspectorResizer" role="separator" aria-label="Resize inspector" aria-controls="workbench inspectorPanel" aria-orientation="vertical" aria-valuemin="210" aria-valuenow="268" aria-valuemax="600" tabindex="0" title="Drag to resize the inspector"></div>
       <aside class="inspector" id="inspectorPanel">
         <div class="inspector-inner">
-          <section>
+          <section data-workspace-only="editing">
             <h2 class="inspector-title">Automatic assembly</h2>
-            <p class="inspector-intro">All imported footage is considered automatically. Each source is treated as one scene.</p>
+            <p class="inspector-intro">All imported footage is considered automatically. Analyze footage to match motion, speech and clapping to the music.</p>
             <div class="field">
               <label for="minimumConsecutiveClips">Minimum clips before switching scenes</label>
               <input id="minimumConsecutiveClips" type="number" min="1" step="1" value="2">
@@ -119,20 +191,58 @@
             <div class="field-hint">Scene importance is a relative selection weight: 1 is neutral, below 1 reduces use, and above 1 increases use.</div>
             <h3 class="section-heading">Scene importance <span>0.1–5</span></h3>
             <div class="section-list scene-list" id="sceneList"><div class="cut-empty">Add video sources to set their scene importance.</div></div>
-            <div class="notice" id="assemblyNotice" aria-live="polite"></div>
+            <label class="analysis-preference"><input id="useFootageAnalysis" type="checkbox" checked> Use analysis for clip selection</label>
+            <div class="field-hint">Adjust music accents and footage ranges in the Analysis workspace.</div>
           </section>
 
-          <section>
+          <section data-workspace-only="analysis" id="footageAnalysisSettings" hidden>
+            <div class="divider"></div>
+            <h2 class="section-heading">Footage analysis <span id="footageAnalysisLabel">Not analyzed</span></h2>
+            <p class="field-hint">Local motion scoring and speech/clapping detection. First use downloads an audio model; no footage is uploaded. Audio ranges are approximate, not word boundaries.</p>
+            <button class="button primary full-button" id="analyzeFootageButton" disabled>Analyze all footage</button>
+            <button class="button full-button hidden" id="cancelFootageButton">Cancel analysis</button>
+            <progress class="hidden footage-progress" id="footageProgress" max="1" value="0" aria-label="Footage analysis progress"></progress>
+            <div class="field-hint">Energetic music favors motion and clapping; quieter music favors calm footage and speech. Keep V1 audio on to hear speech; adjust music volume in the timeline.</div>
+          </section>
+
+          <section data-workspace-only="analysis" id="musicAnalysisSettings" hidden>
             <div class="divider"></div>
             <h2 class="section-heading">Music analysis <span id="analysisLabel">Not analyzed</span></h2>
             <div class="field"><label for="cutCadence">Cut cadence</label><select id="cutCadence"><option value="1">Every beat</option><option value="2" selected>Every 2 beats</option><option value="4">Every bar</option></select><div class="field-hint">Keeps the strongest accent in each beat group.</div></div>
             <div class="field"><label for="sensitivity">Accent sensitivity <span id="sensitivityValue">55%</span></label><input id="sensitivity" type="range" min="25" max="85" value="55"><div class="field-hint">Lower values ignore quieter accents.</div></div>
             <button class="button primary full-button" id="analyzeButton" disabled>Analyze music</button>
-            <div class="notice" id="analysisNotice" aria-live="polite"></div>
             <ul class="cut-list" id="cutList"><li class="cut-empty">Suggested cut points will appear here for review.</li></ul>
-            <div class="field-hint">The timeline updates automatically when footage, music analysis, or assembly settings change.</div>
-            <div class="notice" id="generateNotice" aria-live="polite"></div>
+            <div class="field-hint">Manual accents always create cuts, regardless of cadence. Removing all accents leaves one uncut music interval. Re-analysis retains manual edits.</div>
           </section>
+          <section data-workspace-only="analysis" id="footageRangeEditor" hidden>
+            <div class="divider"></div>
+            <h2 class="section-heading">Edit footage ranges <span id="rangeEditStatus">Detected</span></h2>
+            <p class="field-hint">Analyze a source first, then add, remove or resize its ranges. Manual edits replace only the chosen range type. Unmarked regions score zero for that type; reset restores detector results.</p>
+            <div class="field"><label for="footageRangeKind">Range type</label><select id="footageRangeKind"><option value="speech">Speech</option><option value="clapping">Clapping</option><option value="motion">Motion</option></select></div>
+            <ul id="footageRangeList" class="cut-list range-list"></ul>
+            <div class="range-actions"><button class="button" id="newFootageRange" disabled>New range</button><button class="button" id="removeFootageRange" disabled>Remove selected</button></div>
+            <form id="footageRangeForm">
+              <div class="range-time-fields">
+                <div class="field"><label for="footageRangeStart">Start (seconds)</label><input id="footageRangeStart" type="number" min="0" step="0.001" required disabled></div>
+                <div class="field"><label for="footageRangeEnd">End (seconds)</label><input id="footageRangeEnd" type="number" min="0" step="0.001" required disabled></div>
+              </div>
+              <div class="field" id="motionRangeLevelField"><label for="motionRangeLevel">Motion level <span id="motionRangeLevelValue">100%</span></label><input id="motionRangeLevel" type="range" min="0" max="100" step="1" value="100" disabled></div>
+              <button class="button primary full-button" id="saveFootageRange" type="submit" disabled>Apply range</button>
+            </form>
+            <button class="button full-button" id="resetFootageRanges" disabled>Reset this type to detected ranges</button>
+          </section>
+          <section data-workspace-only="color" hidden>
+            <h2 class="inspector-title">Basic correction</h2>
+            <p class="inspector-intro">Adjust the selected source. Its entire video uses these settings in preview and export; original files stay unchanged.</p>
+            <div id="colorControls"></div>
+            <button class="button full-button" id="resetSourceColor" disabled>Reset source color</button>
+          </section>
+          <div class="notice" id="colorNotice" aria-live="polite"></div>
+          <div class="notice" id="analysisEditNotice" aria-live="polite"></div>
+          <div class="notice" id="analysisNotice" aria-live="polite"></div>
+          <div class="notice" id="footageNotice" aria-live="polite"></div>
+          <div class="notice" id="assemblyNotice" aria-live="polite"></div>
+          <div class="notice" id="generateNotice" aria-live="polite"></div>
         </div>
       </aside>
     </div>
@@ -147,10 +257,45 @@
     </div>
   </div>
 
+  <div class="clip-slip-overlay hidden" id="clipSlipOverlay" role="dialog" aria-modal="true" aria-labelledby="clipSlipTitle">
+    <section class="clip-slip-dialog">
+      <header class="clip-slip-heading">
+        <div>
+          <h2 id="clipSlipTitle">Choose the source segment</h2>
+          <p id="clipSlipTimelineRange"></p>
+        </div>
+        <button class="icon-button" id="closeClipSlip" type="button" aria-label="Close source segment editor">×</button>
+      </header>
+      <video id="clipSlipPreview" controls playsinline preload="metadata"></video>
+      <div class="clip-slip-meta">
+        <strong id="clipSlipSourceName"></strong>
+        <output id="clipSlipRange" aria-live="polite"></output>
+      </div>
+      <div class="clip-slip-markers">
+        <button class="button" id="clipSlipSetStart" type="button" disabled>Set Start to player time</button>
+        <output id="clipSlipPlayerTime" aria-live="polite">Player: 00:00.0</output>
+        <button class="button" id="clipSlipSetEnd" type="button" disabled>Set End to player time</button>
+      </div>
+      <div class="clip-slip-ruler" id="clipSlipRuler" aria-hidden="true"></div>
+      <div class="clip-slip-track" id="clipSlipTrack" role="slider" tabindex="0" aria-label="Source segment used by this clip" aria-orientation="horizontal">
+        <div class="clip-slip-window" id="clipSlipWindow"><span>USED BY CLIP</span></div>
+      </div>
+      <p class="clip-slip-hint">Drag the highlighted segment, or set either edge from the player timestamp. The source segment length and clip’s timeline position stay the same.</p>
+      <footer class="clip-slip-footer">
+        <span>Drag the highlighted segment · Arrow keys adjust · Shift for larger steps</span>
+        <button class="button primary" id="doneClipSlip" type="button">Done</button>
+      </footer>
+    </section>
+  </div>
+
   <input class="hidden" id="musicInput" type="file" accept="audio/*">
   <input class="hidden" id="videoInput" type="file" accept="video/*" multiple>
   <audio id="musicPlayer"></audio>
 
+  <script src="shared/footage-analysis.js" defer></script>
+  <script src="shared/music-accents.js" defer></script>
+  <script src="shared/color-correction.js" defer></script>
+  <script src="shared/audio-scrubber.js" defer></script>
   <script src="renderer/app.js" defer></script>
 </body>
 </html>

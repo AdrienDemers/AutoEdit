@@ -19,6 +19,14 @@ contextBridge.exposeInMainWorld('autoEditDesktop', Object.freeze({
   loadSession: () => ipcRenderer.invoke('session:load'),
   saveSession: (session) => ipcRenderer.sendSync('session:save', session),
   readAudioFile: (filePath) => ipcRenderer.invoke('media:read-audio', filePath),
+  getFootageFingerprint: (filePath) => ipcRenderer.invoke('footage:fingerprint', filePath),
+  analyzeFootage: (options) => ipcRenderer.invoke('footage:analyze', options),
+  cancelFootageAnalysis: () => ipcRenderer.invoke('footage:cancel'),
+  onFootageProgress: (callback) => {
+    const listener = (_event, progress) => callback(progress);
+    ipcRenderer.on('footage:progress', listener);
+    return () => ipcRenderer.removeListener('footage:progress', listener);
+  },
   openAnalysisWindow: (options) => ipcRenderer.invoke('analysis:open', options),
   applyAnalysisSettings: (settings) => ipcRenderer.sendSync('analysis:apply', settings),
   onAnalysisSettings: (callback) => {
